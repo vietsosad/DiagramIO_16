@@ -1,0 +1,4 @@
+C2 v2.3.2 50683e5d15a0ab458298a5178412c71b7aaf8721 --diagramio.cache.mode=local --diagramio.cache.share-tokens=false
+C2b3 HEAD 50683e5d15a0ab458298a5178412c71b7aaf8721 --diagramio.cache.mode=local
+C3 v2.3.2 50683e5d15a0ab458298a5178412c71b7aaf8721 --diagramio.cache.mode=two-level --diagramio.cache.share-tokens=false
+C3b3 HEAD 50683e5d15a0ab458298a5178412c71b7aaf8721 --diagramio.cache.mode=two-level

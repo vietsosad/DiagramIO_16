@@ -12,6 +12,10 @@ spring:
       ddl-auto: validate # Schema do Flyway quản lý, Hibernate chỉ kiểm tra
   flyway:
     enabled: true
+  lifecycle:
+    # Tắt êm (B4, ADR-0006): thời gian tối đa chờ các request đang chạy xong; quá thì dừng hẳn. Docker phải cho
+    # dừng lâu hơn mức này (docker-compose.scale.yml: stop_grace_period) thì SIGKILL mới không cắt ngang.
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:20s}
   data:
     redis:
       # Chỉ dùng khi diagramio.cache.mode là redis hoặc two-level; host, port ghi đè bằng SPRING_DATA_REDIS_*.
@@ -26,6 +30,8 @@ spring:
 server:
   # Sau proxy/load balancer: dùng X-Forwarded-Host/Proto để ghép đúng địa chỉ bên ngoài (vd. shareUrl)
   forward-headers-strategy: framework
+  # SIGTERM: ngừng nhận kết nối mới, readiness chuyển sang REFUSING_TRAFFIC, chờ request đang chạy xong rồi mới dừng
+  shutdown: graceful
   tomcat:
     # Cần cho số liệu luồng Tomcat (tomcat.threads.busy, tomcat.threads.current)
     mbeanregistry:
@@ -43,6 +49,13 @@ management:
     web:
       exposure:
         include: [health, prometheus]
+  endpoint:
+    health:
+      # /actuator/health/liveness và /actuator/health/readiness (B4): Docker, bộ đo và người vận hành biết một
+      # instance còn sống và có nhận traffic hay không. Readiness không gồm CSDL hay Redis: chúng dùng chung cho mọi
+      # instance, nên một sự cố của chúng không được làm cả cụm cùng "chưa sẵn sàng".
+      probes:
+        enabled: true
   health:
     redis:
       # Cache tự chuyển sang CSDL khi mất Redis, nên Redis không quyết định app còn sống hay không

@@ -2,3 +2,6 @@
 # Log thô và số liệu Prometheus đầy đủ quá lớn; mọi con số của báo cáo đã có trong summary.csv.
 *.log
 prom.csv
+# Tệp tạm của Nginx trong một lần chạy B4 (nginx.conf, timeline.csv, incidents.csv thì giữ)
+nginx-tmp/
+nginx.pid

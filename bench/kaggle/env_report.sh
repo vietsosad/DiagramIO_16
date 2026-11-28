@@ -25,18 +25,19 @@ for cpu in $(allowed_cpus); do
   echo "cpu$cpu thread_siblings: $(cat "/sys/devices/system/cpu/cpu$cpu/topology/thread_siblings_list" 2>/dev/null)"
 done
 section "Bố trí CPU của phép đo"
-echo "hệ thống được đo (app, PostgreSQL, Redis): $SUT_CPUS"
+echo "hệ thống được đo (app, PostgreSQL, Redis, Nginx): $SUT_CPUS"
 echo "tạo tải và thu số liệu (k6, bench/collect): $LOADGEN_CPUS"
 section "Bộ nhớ, đĩa"
 free -h
 df -h "$WORK_DIR" 2>/dev/null || df -h /tmp
 section "Phần mềm"
 "$JAVA" -version 2>&1
-"$K6" version 2>&1 | head -n 1
-"$ASPROF" --version 2>&1 | head -n 1
+"$K6" version 2>&1 | awk 'NR == 1'
+"$ASPROF" --version 2>&1 | awk 'NR == 1'
 "$PYTHON" --version
 pg_admin -d postgres -At -c "SELECT version()"
 redis-server --version 2>/dev/null || echo "redis-server: chưa cài"
+"$NGINX" -v 2>&1 || echo "nginx: chưa cài"
 section "Cấu hình PostgreSQL"
 pg_admin -d postgres -At -F ' = ' -c "SELECT name, setting || COALESCE(unit, '') FROM pg_settings WHERE name IN
   ('shared_buffers', 'effective_cache_size', 'work_mem', 'max_connections', 'max_wal_size', 'checkpoint_timeout',
@@ -51,4 +52,4 @@ echo "JVM_OPTS: $JVM_OPTS -XX:ActiveProcessorCount=$SUT_NCPU"
 echo "cổng API $APP_PORT, cổng quản trị $MGMT_PORT"
 section "Mã nguồn"
 git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null
-git -C "$REPO_DIR" status --short 2>/dev/null | head -n 20
+git -C "$REPO_DIR" status --short 2>/dev/null | awk 'NR <= 20'

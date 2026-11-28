@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck -x -S warning bench/kaggle/*.sh bench/collect/*.sh
+        run: shellcheck -x -S warning bench/kaggle/*.sh bench/collect/*.sh deploy/*.sh deploy/nginx/*.sh
       - name: Cú pháp Python
         run: find bench -name '*.py' -print0 | xargs -0 python3 -m py_compile
 
@@ -62,6 +62,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Kiểm tra docker-compose.yml
         run: docker compose config --quiet
+      - name: Kiểm tra docker-compose.scale.yml (B4)
+        run: docker compose -f docker-compose.yml -f docker-compose.scale.yml config --quiet
+      # Đúng các file và đường dẫn mà docker-compose.scale.yml gắn vào container nginx; servers.conf nằm ở chỗ
+      # 40-diagramio-servers.sh chép nó tới lúc container khởi động
+      - name: Kiểm tra cấu hình Nginx (B4)
+        run: >-
+          docker run --rm
+          -v "$PWD/deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro"
+          -v "$PWD/deploy/nginx/http.conf:/etc/nginx/diagramio/http.conf:ro"
+          -v "$PWD/deploy/nginx/server.conf:/etc/nginx/diagramio/server.conf:ro"
+          -v "$PWD/deploy/nginx/servers.conf:/etc/nginx/diagramio-runtime/servers.conf:ro"
+          nginx:1.28-alpine nginx -t
       - uses: docker/setup-buildx-action@v3
       - name: Build image
         uses: docker/build-push-action@v6

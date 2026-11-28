@@ -33,6 +33,9 @@ export const OUT = __ENV.OUT || 'k6-summary.json';
 // closed: số VU cố định, không nghỉ (như pha 1); fixed: tốc độ đến cố định; capacity: tăng tốc độ đến theo bậc
 export const MODE = __ENV.MODE || 'fixed';
 export const WARMUP = int('WARMUP', 60);           // giây, không tính vào kết quả
+// fixed: số giây đầu warm-up tăng dần tốc độ từ RAMP_FROM lên RATE (0 = đủ RATE ngay từ đầu, như m0, b12, b3).
+// JVM nguội nhận ngay 700 req/s thì quá tải suốt 3-4 phút đầu (phiên b3, ADR-0001), tăng dần thì không.
+export const WARMUP_RAMP = int('WARMUP_RAMP', 0);
 export const MEASURE = int('MEASURE', 180);        // giây đo (closed, fixed)
 export const VUS = int('VUS', 10);                 // closed
 export const RATE = int('RATE', 200);              // request/giây (fixed)
@@ -54,13 +57,19 @@ export const SIZE_CLASS = __ENV.SIZE_CLASS || '';  // 'L' cho W3: chỉ thao tá
 export const PAGE_SIZE = int('PAGE_SIZE', 20);
 export const W1_PAYLOAD = __ENV.W1_PAYLOAD || 'tiny';
 
+export const RAMP_FROM = int('RAMP_FROM', 50);    // fixed với WARMUP_RAMP > 0: tốc độ lúc bắt đầu tăng
+
 if (['closed', 'fixed', 'capacity'].indexOf(MODE) < 0) {
   throw new Error(`MODE phải là closed, fixed hoặc capacity, nhận được "${MODE}"`);
+}
+if (WARMUP_RAMP < 0 || WARMUP_RAMP > WARMUP) {
+  throw new Error(`WARMUP_RAMP phải trong khoảng 0..WARMUP (${WARMUP}), nhận được ${WARMUP_RAMP}`);
 }
 
 /** Cấu hình đã dùng, ghi kèm kết quả để mỗi lần chạy tự mô tả được. */
 export const RUN_CONFIG = {
-  baseUrl: BASE_URL, mode: MODE, warmup: WARMUP, measure: MEASURE, vus: VUS, rate: RATE,
+  baseUrl: BASE_URL, mode: MODE, warmup: WARMUP, warmupRamp: WARMUP_RAMP, rampFrom: RAMP_FROM,
+  measure: MEASURE, vus: VUS, rate: RATE,
   rateStart: RATE_START, rateStep: RATE_STEP, rateMax: RATE_MAX, step: STEP, settle: SETTLE,
   maxVus: MAX_VUS, preVus: PRE_VUS, sloP95Ms: SLO_P95_MS, abortP95Ms: ABORT_P95_MS,
   abortErrorRate: ABORT_ERROR_RATE, zipfS: ZIPF_S, sizeClass: SIZE_CLASS, pageSize: PAGE_SIZE,

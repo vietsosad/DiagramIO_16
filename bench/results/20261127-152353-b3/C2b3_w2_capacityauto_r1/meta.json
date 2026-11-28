@@ -1,0 +1,22 @@
+{
+ "run": "C2b3_w2_capacityauto_r1",
+ "config": "C2b3",
+ "git_sha": "50683e5d15a0ab458298a5178412c71b7aaf8721",
+ "workload": "w2",
+ "mode": "capacity",
+ "level": "auto",
+ "rep": "1",
+ "profiled": false,
+ "status": "ok",
+ "k6_exit": 99,
+ "started_at": "2026-11-27T16:34:36Z",
+ "ended_at": "2026-11-27T16:43:32Z",
+ "warmup_s": 180,
+ "measure_s": 180,
+ "jvm_opts": "-Xms2g -Xmx2g -XX:+UseG1GC -XX:+AlwaysPreTouch",
+ "sut_cpus": "0,1,2",
+ "loadgen_cpus": "3",
+ "k6_args": "-e MODE=capacity -e WARMUP=180 -e MEASURE=180 -e WORKLOAD=w2 -e FIXTURES=/tmp/diagramio-bench/dataset/fixtures -e BASE_URL=http://127.0.0.1:8080 -e RATE_START=100 -e RATE_STEP=100 -e RATE_MAX=3000 -e MAX_VUS=1000",
+ "app_args": "--diagramio.cache.mode=local",
+ "dataset_manifest_sha256": "d3b026311855a73e011f07082e8111d08b388327de6d1c1e2c69852b88fb921b"
+}

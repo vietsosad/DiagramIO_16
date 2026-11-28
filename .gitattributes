@@ -3,3 +3,5 @@
 mvnw text eol=lf
 bench/**/*.py text eol=lf
 bench/**/*.js text eol=lf
+# Cấu hình Nginx được mount vào container Linux (docker-compose.scale.yml) và dùng trên Kaggle
+deploy/**/*.conf text eol=lf

@@ -621,15 +621,16 @@ Báo cáo kết quả trình bày mọi bài toán theo cùng một khung: kịc
 **Must**
 - [x] B1: access info, UPDATE có điều kiện, snapshot và khôi phục trong DB, projection, `ORDER BY`, index, `Persistable` ([ADR-0002](adr/0002-toi-uu-truy-cap-du-lieu.md), tag `v2.1-b1`)
   - [x] Số đo C1 trên Kaggle (ma trận `b12`, [kết quả](pha-2/ket-qua.md) mục 3), EXPLAIN trước và sau
-  - [ ] Tinh chỉnh runtime (ma trận `tune`, tùy chọn; chọn kích thước pool cho B4)
+  - [ ] Tinh chỉnh runtime (ma trận `tune`, tùy chọn). Không cần cho B4: phiên `b3` cho thấy ở 400 req/s chỉ 0,7-1,0 kết nối đang dùng, nên B4 chia tổng 12 kết nối cho các instance
 - [x] B2: decorator cache, write-through có so version, bia mộ, pub/sub hủy L1 kèm heartbeat, chạy tiếp bằng CSDL khi Redis hỏng, ETag/304 ([ADR-0003](adr/0003-cache-hai-tang-etag.md))
   - Micro-cache danh sách công khai: có nhưng tắt mặc định (lý do ở ADR-0003 mục 4)
   - [x] Số đo C2, C3 trên Kaggle (ma trận `b12`, [kết quả](pha-2/ket-qua.md) mục 4); phiên đo phát hiện cache trả bản cũ khi Redis hết thời gian chờ, đã sửa ([ADR-0003](adr/0003-cache-hai-tang-etag.md) mục 8)
-  - [ ] Đo lại C2, C3 với bản sửa (ma trận `b3`)
+  - [x] Đo lại C2, C3 với bản sửa (ma trận `b3`, [kết quả](pha-2/ket-qua.md) mục 7.2): không còn 409 sai
 - [x] B3: cache token (Caffeine một instance, chỉ Redis nhiều instance), dấu "đang đổi" chặn lần nạp chậm, fail-closed 503, cache âm, E2E hai instance (QA-SEC1) ([ADR-0004](adr/0004-cache-token-chia-se.md))
-  - [ ] Số đo trên Kaggle (ma trận `b3`)
+  - [x] Số đo trên Kaggle (ma trận `b3`, [kết quả](pha-2/ket-qua.md) mục 7.3): SQL mỗi request của W2 −20%; phiên đo cũng cho thấy cần warm-up tăng dần ở tốc độ cao (mục 7.4, đã sửa bộ đo)
 - [x] Rà soát và gia cố sau B3: giới hạn body 413, app khởi động khi Redis chết, bộ nhớ cache theo heap, một lượt Redis mỗi lần ghi, CI, image theo lớp ([ADR-0005](adr/0005-ra-soat-gia-co-sau-b3.md))
-- [ ] B4: Nginx, graceful shutdown, `docker-compose.scale.yml`, đo 1-2-3 instance, W7
+- [x] B4: Nginx (cấu hình dùng chung cho compose, Kaggle, test), tắt êm và probe, `docker-compose.scale.yml`, khởi động lại cuốn chiếu, bộ đo nhiều instance, W7 và W7r ([ADR-0006](adr/0006-mo-rong-ngang-san-sang.md), tag `v2.4-b4`)
+  - [ ] Số đo trên Kaggle (ma trận `b4`): 1-2-3 instance, W7
 - [ ] B5: rate limit, bulkhead BCrypt, phát hiện refresh token bị dùng lại, W5
 - [ ] `ArchitectureTest` mở rộng; `AGENTS.md` cập nhật quy tắc pha 2
 

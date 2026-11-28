@@ -1,0 +1,7 @@
+relname,heap_blks_read,heap_blks_hit,idx_blks_read,idx_blks_hit,toast_blks_read,toast_blks_hit,tidx_blks_read,tidx_blks_hit
+diagram_shares,4,15704,0,48576,,,,
+diagram_versions,5,60563,0,121882,13,49771,0,50993
+diagrams,5,23028148,3,2593673,17,307929,0,146824
+flyway_schema_history,0,0,0,0,0,0,0,0
+refresh_tokens,0,417,0,738,,,,
+users,1,22672,0,15412,0,0,0,0

@@ -1,6 +1,6 @@
 # ADR-0004: Cache xác thực link chia sẻ, thu hồi có hiệu lực ngay (B3)
 
-- Trạng thái: Đã triển khai, chờ số đo Kaggle (ma trận `b3`)
+- Trạng thái: Đã triển khai, đã đo (phiên `b3`, [kết quả](../pha-2/ket-qua.md) mục 7.3)
 - Mốc: B3 trong [kế hoạch pha 2](../ke-hoach-pha-2.md)
 - Liên quan: [ADR-0003](0003-cache-hai-tang-etag.md) (cache sơ đồ, B2), [ADR-0001](0001-phuong-phap-do.md) (phương pháp đo)
 
@@ -62,4 +62,22 @@ Mô hình nhất quán:
 - `ShareTokenCacheE2eTest`: đọc qua `X-Share-Token` và `GET /shares/{token}` khi trúng cache chạy **0 câu SQL, 0 lần mượn kết nối** (trước là 2 câu); thu hồi, hạ quyền, nâng quyền, xóa sơ đồ có hiệu lực ngay request tiếp theo.
 - `TwoInstanceCacheE2eTest` (QA-SEC1): hai instance thật dùng chung PostgreSQL và Redis. Thu hồi hoặc hạ quyền ở A thì **request đầu tiên** ở B bị từ chối, không chờ; Redis treo thì thu hồi ở A trả 503 và token vẫn dùng được ở B, Redis trở lại thì thu hồi được và B từ chối ngay.
 - Toàn bộ `./mvnw test` xanh; `SqlPerRequestE2eTest` (cache tắt) không đổi.
-- Số đo Kaggle: ma trận `b3` (C2, C3 không có cache token so với C2b3, C3b3, cùng jar, cùng phiên): SQL mỗi request, p95 của `share_open` và `share_header`, tỉ lệ trúng cache token, CPU PostgreSQL, sức chứa W2.
+- Số đo Kaggle: phiên [`20261127-152353-b3`](../../bench/results/20261127-152353-b3/report.md) (C2, C3 không có cache token so với C2b3, C3b3, cùng jar, cùng phiên), mục kết quả bên dưới.
+
+## Kết quả đo (phiên `b3`)
+
+W2, 400 req/s, trung vị của 2 lần lặp ([chi tiết](../pha-2/ket-qua.md) mục 7.3):
+
+| | C2 → C2b3 (trong JVM) | C3 → C3b3 (Redis) |
+|---|---|---|
+| SQL mỗi request | 0,84 → 0,68 (−19%) | 0,82 → 0,66 (−20%) |
+| Transaction CSDL mỗi request | 0,75 → 0,59 (−21%) | 0,73 → 0,57 (−22%) |
+| Trúng cache token (gồm cache âm) | 80% | 80% |
+| p50 mở link, đọc kèm token (ms) | 2,0 → 1,1 ở lần lặp không bị nhiễu | 2,1 → 2,1 |
+| Sức chứa W2 (p95 ≤ 100 ms) | 700 → 700 req/s | 700 → 750 req/s |
+
+- **Đạt chỉ tiêu của kế hoạch về CSDL.** Request qua link trúng cache không chạy câu SQL nào (trước là 2 câu), và cả W2 bớt một phần năm số câu lệnh. Kết quả ổn định ở mọi lần lặp.
+- **Độ trễ:** cache trong JVM giảm p50 của đường qua link gần một nửa. Với Redis, một lượt Redis thay cho một câu SQL, tốn gần như bằng nhau; đúng với hệ quả đã ghi ở trên. Lợi ích ở nhiều instance là bớt việc cho PostgreSQL, nơi mọi instance dùng chung.
+- **CPU app và p95:** không kết luận được trên máy này. Hai trong ba lần chạy C2b3 trùng lúc máy ảo bị chiếm CPU (steal tới 10,6% trong khoảng 15 giây, CPU của k6 cho mỗi request tăng 9-24% dù k6 làm cùng một việc). Tùy lát cắt, chênh lệch CPU app nằm trong khoảng −7% (các lần đo sức chứa) đến +9% (chỉ các khoảng 10 giây không bị nhiễu). Flame graph cho thấy phần xác thực link rẻ đi (`ShareService` 7,6% → 3,7% số mẫu); không có điểm nóng mới.
+- **Quyết định giữ nguyên:** cache token bật mặc định (`diagramio.cache.share-tokens=true`). Phiên `b4` chạy mọi cấu hình với cache token.
+- **QA-SEC1: đạt**, bằng `TwoInstanceCacheE2eTest` (hai instance thật, request đầu tiên ở B sau khi thu hồi ở A bị từ chối).

@@ -3,8 +3,8 @@
 import exec from 'k6/execution';
 import { Gauge } from 'k6/metrics';
 import {
-  ABORT_ERROR_RATE, ABORT_P95_MS, MAX_VUS, MEASURE, MODE, OUT, PRE_VUS, RATE, RATE_MAX, RATE_START,
-  RATE_STEP, RUN_CONFIG, SETTLE, STEP, VUS, WARMUP,
+  ABORT_ERROR_RATE, ABORT_P95_MS, MAX_VUS, MEASURE, MODE, OUT, PRE_VUS, RAMP_FROM, RATE, RATE_MAX, RATE_START,
+  RATE_STEP, RUN_CONFIG, SETTLE, STEP, VUS, WARMUP, WARMUP_RAMP,
 } from './config.js';
 
 // Thời điểm kịch bản bắt đầu (ms từ epoch), để đối chiếu với số liệu phía server theo thời gian
@@ -36,6 +36,19 @@ function preAllocated(rate) {
 function scenario() {
   if (MODE === 'closed') {
     return { executor: 'constant-vus', vus: VUS, duration: `${WARMUP + MEASURE}s`, gracefulStop: '30s' };
+  }
+  if (MODE === 'fixed' && WARMUP_RAMP > 0) {
+    // Tăng tuyến tính từ RAMP_FROM lên RATE trong WARMUP_RAMP giây đầu, rồi giữ RATE tới hết pha đo. Pha đo bắt đầu
+    // sau WARMUP như mọi chế độ, nên đã chạy đủ RATE ít nhất WARMUP - WARMUP_RAMP giây.
+    const from = Math.min(RATE, Math.max(1, RAMP_FROM));
+    return {
+      executor: 'ramping-arrival-rate', startRate: from, timeUnit: '1s',
+      stages: [
+        { target: RATE, duration: `${WARMUP_RAMP}s` },
+        { target: RATE, duration: `${WARMUP - WARMUP_RAMP + MEASURE}s` },
+      ],
+      preAllocatedVUs: preAllocated(RATE), maxVUs: MAX_VUS, gracefulStop: '30s',
+    };
   }
   if (MODE === 'fixed') {
     return {

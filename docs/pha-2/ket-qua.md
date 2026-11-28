@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| Trạng thái | B1, B2 đã đo (phiên `b12`, mục 1-6). B3 chờ phiên `b3`, cũng là lần đo lại C2, C3 sau bản sửa ở mục 6 |
-| Phiên đo | [`20261126-144513-b12`](../../bench/results/20261126-144513-b12/report.md), Kaggle CPU, 26-27/11/2026 |
+| Trạng thái | B1, B2 đã đo (phiên `b12`, mục 1-6). B3 và lần đo lại C2, C3 sau bản sửa ở mục 6 đã đo (phiên `b3`, mục 7). B4 chờ phiên `b4` |
+| Phiên đo | [`20261126-144513-b12`](../../bench/results/20261126-144513-b12/report.md), Kaggle CPU, 26-27/11/2026; [`20261127-152353-b3`](../../bench/results/20261127-152353-b3/report.md), Kaggle CPU, 27/11/2026 |
 | Phương pháp | [ADR-0001](../adr/0001-phuong-phap-do.md); cách chạy lại: [bench/README.md](../../bench/README.md) |
-| Quyết định liên quan | [ADR-0002](../adr/0002-toi-uu-truy-cap-du-lieu.md) (B1), [ADR-0003](../adr/0003-cache-hai-tang-etag.md) (B2) |
+| Quyết định liên quan | [ADR-0002](../adr/0002-toi-uu-truy-cap-du-lieu.md) (B1), [ADR-0003](../adr/0003-cache-hai-tang-etag.md) (B2), [ADR-0004](../adr/0004-cache-token-chia-se.md) (B3) |
 | Mốc so sánh | [Đánh giá hiện trạng](danh-gia-hien-trang.md) (C0, phiên M0) |
 
 ## 1. Tóm tắt
@@ -14,6 +14,8 @@
 - **B2 (C1 → C2, cache trong JVM) giảm việc của CSDL, độ trễ W2 gần như không đổi.** Tỉ lệ trúng L1 là 80%. Số câu SQL mỗi request của W2 giảm 42% (1,49 → 0,87). Ở trạng thái gần ổn định, CPU PostgreSQL giảm 18% (W2) và 53% (W3), thời gian xử lý phía server của W3 giảm 44%. p95 của W2 vẫn khoảng 9-14 ms: phần còn lại là danh sách, tìm kiếm, lịch sử và các lần ghi, không thuộc phạm vi cache. Sức chứa theo SLO vẫn là 800 req/s, vì ở mức đó máy tạo tải (k6, 1 vCPU) đã là nút thắt. Tốc độ còn phục vụ kịp tăng từ khoảng 850 lên khoảng 1.000 req/s.
 - **C3 (thêm Redis, một instance) đắt hơn C2 mà không nhẹ thêm cho CSDL.** CPU app cao hơn 15%, W1 chậm hơn 18%. Đúng như dự kiến: L2 chỉ có ích khi nhiều instance dùng chung (B4).
 - **Phiên đo phát hiện hai lỗi thật của B2 và hai thiếu sót của bộ đo, đều đã sửa** (mục 6). Lỗi B2 là 6 lần 409 sai ở C3, do cache trả bản cũ sau các lần Redis hết thời gian chờ. Thiếu sót của bộ đo là warm-up 60 giây chưa đủ, và lần "mở lại" hầu như không gửi ETag hợp lệ. Vì vậy số của C3 (và một phần của C2) ở phiên này bị ảnh hưởng; phiên `b3` đo lại C2, C3 bằng mã đã sửa.
+- **Bản sửa của B2 đứng vững khi đo lại (phiên `b3`, mục 7.2).** Không có lần 409 nào trong cả 28 lần chạy. Trong đó 10 lần chạy có Redis mà mỗi lần vẫn có 71-268 lệnh Redis hết thời gian chờ lúc warm-up (phiên `b12`: 6 lần 409 sai trong hoàn cảnh đó). 304 tăng từ 0,3% lên 2,5-3,0% số request. Hai tầng trên một instance vẫn tốn hơn C2 khoảng 15% CPU app.
+- **B3 (cache token) bỏ được việc của CSDL, không đổi được độ trễ hay sức chứa trên máy này** (mục 7.3). Số câu SQL mỗi request giảm 19-20%, số transaction giảm 21-22%, tỉ lệ trúng cache token 80%. Một instance: p50 của request qua link giảm từ 2,0 xuống 1,1 ms ở lần lặp không bị nhiễu. Hai tầng: một lượt Redis thay một câu SQL, p50 giữ 2,1 ms. Sức chứa của bốn cấu hình là 700-750 req/s, chênh nhau không quá một bậc. Hai lần chạy có cache token trùng lúc máy ảo bị chiếm CPU (steal tới 10,6%), nên chênh lệch CPU app (−7% đến +9% tùy lát cắt) không tách được khỏi nhiễu.
 
 ## 2. Phiên đo
 
@@ -191,15 +193,97 @@ Kế hoạch định nghĩa 10% request của W2 là client mở lại sơ đồ
 
 Với 1 vCPU, k6 dùng quá 80% CPU từ khoảng 850 req/s. Trên một máy Kaggle 4 vCPU không thể cấp thêm CPU cho k6 mà không lấy của hệ thống được đo. Vì vậy sức chứa của cấu hình có cache chỉ được báo là "ít nhất", và phiên `b3` thêm một mức tốc độ cố định 700 req/s.
 
-## 7. Giới hạn
+## 7. B3 và đo lại C2, C3 (phiên `b3`)
+
+### 7.1 Phiên đo
+
+- Phiên [`20261127-152353-b3`](../../bench/results/20261127-152353-b3/report.md), 27/11/2026, 15:23 tới khoảng 19:05 UTC. Máy cùng loại với phiên `b12` (Kaggle CPU, Xeon 2,20 GHz, 4 vCPU); bố trí CPU, heap, dữ liệu như mục 2.
+- Một jar (`v2.3.2`, commit `50683e5`, có bản sửa ở mục 6.1), bật tắt cache token bằng cờ:
+
+| Cấu hình | Tham số | Ý nghĩa |
+|---|---|---|
+| C2 | `--diagramio.cache.mode=local --diagramio.cache.share-tokens=false` | B2, cache sơ đồ trong JVM, không cache token |
+| C2b3 | `--diagramio.cache.mode=local` | C2 cộng cache token trong JVM (B3) |
+| C3 | `--diagramio.cache.mode=two-level --diagramio.cache.share-tokens=false` | B2 hai tầng, không cache token |
+| C3b3 | `--diagramio.cache.mode=two-level` | C3 cộng cache token trên Redis (B3) |
+
+- W2 ở 400 và 700 req/s, sức chứa, 2 lần lặp, cộng một lần chạy lấy flame graph ở 400 req/s cho mỗi cấu hình. Warm-up 180 giây, đo 180 giây. 28 lần chạy.
+- Báo cáo được sinh lại bằng `report.py` của B4 (commit B4 cùng nhánh). Mọi con số giữ nguyên. Hai thay đổi: dòng bố trí CPU (trước in "?"), và bảng p95 theo thao tác lấy mức cao nhất mà mọi cấu hình còn giữ SLO (400) thay vì mức giữa (700, nơi mọi cấu hình đều quá tải, mục 7.4).
+
+### 7.2 Đo lại C2, C3 sau bản sửa cache
+
+| Chỉ số (W2, 400 req/s) | C2 ở `b12` | C2 ở `b3` | C3 ở `b12` | C3 ở `b3` |
+|---|---|---|---|---|
+| p95 / p99 (ms) | 13,7 / 40,3 | 12,9 / 55,8 | 17,2 / 74,5 | 14,0 / 41,6 |
+| CPU app (cả pha đo; `b12`: 1/3 cuối) | 0,78 (0,59) | 0,58 | 0,96 (0,68) | 0,68 |
+| Server trung bình (ms) | 3,20 | 2,93 | 3,95 | 3,33 |
+| Trúng cache | L1 80% | L1 84% | L1 79%, L2 15% | L1 83%, L2 35% |
+| 304 | 0,3% | 2,6% | 0,3% | 2,9% |
+| Lần 409 | 0 | 0 | 6 (sai) | 0 |
+
+Hai phiên chạy trên hai máy ảo khác nhau, nên cột `b12` chỉ để đối chiếu, không để tính phần trăm cải thiện. Ba điều so được:
+
+- **Không còn 409 sai.** Hoàn cảnh gây lỗi ở `b12` vẫn xảy ra: lúc warm-up, cả 3 CPU bão hòa và các lệnh Redis chở sơ đồ lớn hết thời gian chờ (71-268 lệnh mỗi lần chạy, ở cả 10 lần chạy tốc độ cố định có Redis; 0 lệnh trong pha đo). Với bản sửa, cache không còn trả bản cũ: không lần chạy nào có 409, và L1 vẫn trúng 83%.
+- **Warm-up 180 giây đủ ở 400 req/s.** CPU app ở phần ba đầu và phần ba cuối pha đo chênh nhau dưới 25% ở mọi lần chạy 400 req/s, trừ một lần (`C2b3_w2_fixed400_r2`, 34%, trùng lúc máy ảo bị chiếm CPU, mục 7.3). CPU app cả pha đo bằng mức của phần ba cuối ở `b12`.
+- **Hai tầng trên một instance vẫn là chi phí thuần, đúng như `b12`.** C3 so với C2 trong cùng phiên: CPU app +17% (0,68 so với 0,58), thời gian phía server +14%. L2 trúng 35% số lần trượt L1 nhưng chỉ bớt được 0,02 câu SQL mỗi request (0,82 so với 0,84): trên một instance, Redis chỉ có ích với những sơ đồ L1 đã bỏ ra (hết chỗ, hoặc quá 10 phút thời gian sống của L1).
+
+Mở lại sơ đồ kèm ETag (mục 6.3) giờ được đo thật: 2,5-3,0% số request nhận 304, tức khoảng một phần tư số lần mở lại.
+
+### 7.3 Cache token (B3): C2 → C2b3, C3 → C3b3
+
+W2, 400 req/s, trung vị (min-max) của 2 lần lặp:
+
+| Cấu hình | p50 (ms) | p95 (ms) | p99 (ms) | CPU app | CPU PostgreSQL | CPU k6 | Server trung bình (ms) | SQL/request | Transaction/request | Trúng cache |
+|---|---|---|---|---|---|---|---|---|---|---|
+| C2 | 2,1 | 12,9 (12,4-13,4) | 55,8 | 0,58 | 0,45 | 0,41 | 2,93 | 0,84 | 0,75 | L1 84% |
+| C2b3 | 2,7 | 45,6 (19,1-72,1) | 470 (148-792) | 0,71 | 0,49 | 0,47 | 3,87 | **0,68** | **0,59** | L1 84%, token 80% |
+| C3 | 2,3 | 14,0 | 41,6 | 0,68 | 0,46 | 0,42 | 3,33 | 0,82 | 0,73 | L1 83%, L2 35% |
+| C3b3 | 2,5 | 16,5 | 64,8 | 0,71 | 0,45 | 0,44 | 3,49 | **0,66** | **0,57** | L1 83%, L2 34%, token 80% |
+
+**Phần đo được chắc chắn: việc của CSDL.** Mỗi request qua link (22% số request của W2) trước đây tốn một câu tra `diagram_shares`. Với cache token, số câu SQL mỗi request giảm 19% (C2 → C2b3) và 20% (C3 → C3b3), số transaction giảm 21% và 22%. Kết quả giống nhau ở mọi lần lặp và mọi mức tải. Tỉ lệ trúng 80% (tính cả cache âm): mỗi token được nạp một lần rồi dùng lại tới khi hết 5 phút. Khi trúng cache, đường đọc qua link không chạy câu SQL nào (`ShareTokenCacheE2eTest`), đúng chỉ tiêu "từ 2 câu xuống 0" của kế hoạch.
+
+**Đường qua link nhanh hơn ở một instance, không đổi ở hai tầng.** p50 của `share_open` và `share_header` (mở link, đọc kèm `X-Share-Token`):
+
+| | C2 | C2b3 | C3 | C3b3 |
+|---|---|---|---|---|
+| Lần lặp 1 | 2,0 / 2,0 | **1,1 / 1,2** | 2,1 / 2,1 | 2,1 / 2,2 |
+| Lần lặp 2 | 2,0 / 2,1 | 2,1 / 2,1 | 2,2 / 2,3 | 2,1 / 2,1 |
+
+Ở lần lặp không bị nhiễu, cache trong JVM giảm p50 gần một nửa. Ở chế độ hai tầng, mỗi lần tra token là một lượt Redis (một script Lua) thay cho một câu SQL, tốn gần như bằng nhau. Đây là đánh đổi đã chọn ở [ADR-0004](../adr/0004-cache-token-chia-se.md): ở nhiều instance, token chỉ nằm trên Redis để thu hồi có hiệu lực ngay ở mọi instance. Lợi ích là bớt việc cho PostgreSQL (nút thắt chung khi thêm instance), không phải độ trễ.
+
+**Phần không kết luận được: CPU app và p95.** Theo bảng, C2b3 và C3b3 có p95, p99 và CPU app cao hơn, ở mọi thao tác, kể cả các thao tác không dùng token. Phân tích kỹ cho thấy chênh lệch này chủ yếu đến từ máy ảo, không phải từ cache token:
+
+1. **Máy chậm đi đúng lúc chạy C2b3.** k6 làm cùng một việc ở mọi lần chạy (cùng tốc độ, cùng script), vậy mà CPU của k6 cho mỗi request tăng 9%, 24% và 9% ở ba lần chạy C2b3 (hai lần lặp và lần lấy flame graph) so với lần chạy C2 ngay trước. CPU PostgreSQL cũng tăng dù C2b3 gửi ít câu SQL hơn. Hai trong ba lần đó có steal (máy ảo bị chiếm CPU) tới 10,6% và 4,6% trong những khoảng 15 giây, trong khi ở mọi lần chạy khác không quá 1,9%. Ở `C2b3_w2_fixed400_r2` (p99 792 ms), phía server không có request nào quá 0,5 giây trong cả pha đo, nên đuôi đó nằm ngoài thời gian app xử lý: trong hàng đợi kết nối, hoặc ở chính k6 khi CPU của nó bị chiếm.
+2. **Chỉ xét các khoảng 10 giây "yên"** (steal dưới 1%, CPU k6 không vọt lên). Thời gian xử lý phía server gần như bằng nhau: C2 2,95 ms, C2b3 3,01 ms, C3 3,28 ms, C3b3 3,42 ms. CPU app vẫn cao hơn 7% (C2b3) và 9% (C3b3). Lần lặp 2 của C2b3 không có khoảng yên nào.
+3. **Ở các lần đo sức chứa**, nơi CPU k6 cho mỗi request bằng nhau giữa các cấu hình, C2b3 lại dùng *ít* CPU app cho mỗi request hơn C2 7% (1,72 so với 1,86 ms). C3b3 bằng C3.
+4. **Mã và flame graph không chỉ ra chi phí nào.** Khóa của `LocalShareTokenStore` chỉ bao bước ghi, không bao lần đọc CSDL. Trên flame graph, phần xác thực link rẻ đi: `ShareService` từ 7,6% xuống 3,7% số mẫu, adapter `diagram_shares` từ 7,3% xuống 2,9%. Phần mẫu tăng thêm rải đều trên Tomcat, Spring, Jackson và kernel, đúng kiểu "cùng việc nhưng CPU chậm hơn". Ở C3b3 có thêm phần của Lettuce (+2,4 điểm) cho lượt Redis.
+
+Kết luận: cache token bớt được 20% số câu lệnh của CSDL. Trên máy này, nó không làm giảm, cũng không làm tăng CPU app một cách đo được: chênh lệch nằm trong khoảng −7% đến +9% tùy lát cắt, cùng cỡ với nhiễu của máy ảo. Cờ `diagramio.cache.share-tokens` giữ bật mặc định. Phiên `b4` chạy mọi cấu hình với cache token bật.
+
+**Sức chứa** (p95 ≤ 100 ms): C2 700, C2b3 700, C3 700, C3b3 750 req/s (700 và 800 ở hai lần lặp). Chênh lệch không quá một bậc 100 req/s. Ở các bậc 700-800 req/s, k6 dùng 0,81-0,88 nhân, sát giới hạn 0,8 của nó (mục 6.4). Sức chứa của C2 thấp hơn 800 của phiên `b12`. Hai phiên chạy trên hai máy ảo khác nhau, và script W2 mới (vòng 256 sơ đồ mở lại) tốn CPU k6 hơn một chút (0,41 so với 0,39 nhân ở 400 req/s). Vì vậy chỉ so các cấu hình trong cùng phiên.
+
+QA-SEC1 (thu hồi ở instance A, request đầu tiên ở instance B bị từ chối, 100%) được kiểm bằng test E2E hai instance thật (`TwoInstanceCacheE2eTest`), không cần phép đo tải: **đạt**.
+
+### 7.4 Mức 700 req/s không đo được: JVM nguội nhận ngay toàn bộ tải
+
+Cả 8 lần chạy 700 req/s đều có p95 trên 1 giây. Nguyên nhân là cách bơm tải, không phải sức chứa: tốc độ cố định bắt đầu ngay ở 700 req/s khi JVM còn nguội (JIT chưa biên dịch, cache rỗng). App dùng hết 3 CPU, request xếp hàng, và hàng đợi cần nhiều phút mới tan:
+
+- C2, C2b3 hết quá tải sau 200-270 giây kể từ lúc bắt đầu, tức 20-90 giây vào pha đo. Ở phút cuối, cả bốn lần chạy phục vụ đủ 700 req/s với 5,0-6,5 ms phía server và 0,9-1,06 nhân app.
+- C3, C3b3 cần 330-340 giây, một lần không hết quá tải trong cả lần chạy. Ở hai tầng, một request tốn nhiều CPU hơn, nên khi máy đã bão hòa thì hàng đợi tan chậm hơn.
+
+Các lần đo sức chứa tăng tải từ 100 req/s theo bậc. Ở đó, cả bốn cấu hình đều giữ SLO ở bậc 700 req/s. Như vậy hệ thống đã ấm chịu được 700 req/s, chỉ JVM nguội là không. Ở 400 req/s, khởi động nguội cũng để lại dấu vết: 731-2.133 iteration bị k6 bỏ trong phút đầu (thiếu VU vì độ trễ vọt lên).
+
+Sửa bộ đo: chế độ tốc độ cố định có thêm `WARMUP_RAMP`, tăng tuyến tính từ 50 req/s lên mức yêu cầu trong những giây đầu warm-up rồi giữ nguyên tới hết pha đo ([ADR-0001](../adr/0001-phuong-phap-do.md)). Ma trận `b4` dùng 90 giây tăng dần trong 180 giây warm-up. `m0`, `b12`, `b3` giữ cách cũ (`WARMUP_RAMP=0`) để chạy lại vẫn so được.
+
+## 8. Giới hạn
 
 - Hai lần lặp cho mỗi phép đo (khoảng min-max chỉ có hai điểm); chọn để vừa một phiên Kaggle 12 giờ.
-- Số của C3, và một phần của C2, chịu ảnh hưởng của lỗi ở mục 6.1 và warm-up ngắn ở mục 6.2. Chúng được đo lại ở phiên `b3` bằng mã đã sửa, warm-up 180 giây.
+- Số của C3, và một phần của C2, ở phiên `b12` chịu ảnh hưởng của lỗi ở mục 6.1 và warm-up ngắn ở mục 6.2. Mục 7.2 có số đo lại.
 - Kết luận chỉ đúng trên một máy 4 vCPU, nơi app, PostgreSQL và Redis dùng chung 3 CPU. Ở đó Redis cạnh tranh CPU với chính app. Trên máy riêng cho Redis, chi phí của C3 sẽ khác.
 - SLO p95 ≤ 100 ms không hợp với W3 (PUT 1 MB đã gần 150 ms). Báo cáo dùng thêm "phục vụ kịp tới" cho W3.
+- Máy ảo Kaggle có thể bị chiếm CPU giữa phiên (steal tới 10,6% trong phiên `b3`). Kiểm tra tính hợp lệ chỉ cảnh báo khi steal trung bình cả pha đo vượt 5%, nên những đợt ngắn vẫn lọt qua. Khi một chênh lệch nhỏ (dưới 10%) quan trọng, cần xem CPU k6 cho mỗi request như một tiến trình đối chứng (mục 7.3).
 
-## 8. Việc tiếp theo
+## 9. Việc tiếp theo
 
-1. Phiên `b3` ở REF có bản sửa (tag `v2.3.2`): C2, C2b3, C3, C3b3 (có và không có cache token của B3), W2 400 và 700 req/s, sức chứa, warm-up 180 giây. Kết quả bổ sung vào tài liệu này và [ADR-0004](../adr/0004-cache-token-chia-se.md).
-2. Tùy chọn: ma trận `tune` (pool Hikari 20, virtual threads) để chọn kích thước pool cho B4. B4 cần chia đều tổng số kết nối CSDL cho 1, 2, 3 instance.
-3. B4: chạy nhiều instance sau Nginx, đo W2 với 1, 2, 3 instance và W7 (một instance chết đột ngột).
+1. B4: phiên `b4` ở tag `v2.4-b4`. C3 (một app) so với 1, 2, 3 instance sau Nginx; W2 400, 700 req/s (warm-up tăng dần), sức chứa; W7 (một instance chết đột ngột) và W7r (khởi động lại cuốn chiếu) ở 3 instance ([ADR-0006](../adr/0006-mo-rong-ngang-san-sang.md)).
+2. Tùy chọn: ma trận `tune` (pool Hikari 20, virtual threads). Phiên `b3` cho thấy pool 10 thừa ở 400 req/s: trung bình 0,7-1,0 kết nối đang dùng, không request nào phải chờ. Vì vậy B4 dùng tổng 12 kết nối chia đều cho các instance (12, 6, 4).

@@ -69,6 +69,15 @@
 - `RequestSizeLimitFilter` rejects bodies above `diagramio.http.max-request-size` (default 4 MB) with 413 before anything reads or parses them (ADR-0005). Keep it ahead of Spring Security; the 2 MB `DiagramData` rule stays the domain check (400).
 - Diagram JSON is a `DiagramData` value object: build it with `DiagramData.of(json)` from user input (validates the `nodes`/`edges` shape and 2 MB) and with `DiagramData.fromStorage(json)` only for data read back from the database. Do not pass raw JSON strings through the domain.
 
+## Multiple Instances and Shutdown
+
+- Several instances run behind Nginx (ADR-0006). The Nginx configuration lives only in `deploy/nginx/` (`http.conf`, `server.conf`); `docker-compose.scale.yml`, the Kaggle bench (`bench/kaggle/env.sh`, `lb_config`) and `NginxFailoverE2eTest` all use these files. Change it there, and CI runs `nginx -t` on it.
+- Nginx must never send a POST or PATCH again once it reached an instance: do not add `non_idempotent` to `proxy_next_upstream`. POST and PATCH use the upstream without keepalive (`diagramio_fresh`), so an instance that is shutting down refuses them at connect time and they move on safely.
+- More than one instance needs cache mode `two-level` (or `redis`); `local` would serve stale data across instances. Keep the total number of database connections constant when changing the instance count (`APP_POOL_SIZE` = total / instances; bench `POOL_TOTAL`).
+- Readiness (`/actuator/health/readiness`) reports only the instance itself. Never add PostgreSQL, Redis or another shared dependency to it: one outage would take every instance out of the load balancer at once.
+- Keep the shutdown order (SmartLifecycle phases, higher stops first): readiness `REFUSING_TRAFFIC`, `ShutdownConfig` closes the listening socket (`WebServerGracefulShutdownLifecycle.SMART_LIFECYCLE_PHASE + 1`), Spring Boot drains running requests (`SHUTDOWN_TIMEOUT`), then beans that requests still need stop (`RedisCacheMonitor` at `SMART_LIFECYCLE_PHASE - 2048`). A new lifecycle bean that serves requests must use a phase below the web server's. `GracefulShutdownE2eTest` guards this.
+- A planned restart first takes the instance out of Nginx (`down`, reload, wait until no worker of the old configuration is left), then stops it: `deploy/rolling-restart.sh`. `nginx -s reload` returns before old workers exit; never assume it is done.
+
 ## Data Integrity and Concurrency
 
 - Enforce optimistic locking for diagram updates using the client-supplied `version`.

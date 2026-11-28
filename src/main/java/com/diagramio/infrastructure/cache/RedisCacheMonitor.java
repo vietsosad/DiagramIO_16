@@ -7,6 +7,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.web.context.WebServerGracefulShutdownLifecycle;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.data.redis.connection.Message;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
@@ -24,8 +25,16 @@ import org.springframework.data.redis.listener.RedisMessageListenerContainer;
  *
  * <p>Việc đăng ký kênh pub/sub cũng chạy trong luồng theo dõi, không chạy lúc khởi động app: Redis chưa lên (hay đang
  * khởi động lại) thì app vẫn khởi động và phục vụ bằng CSDL, đăng ký được thử lại ở mỗi nhịp cho tới khi thành công.
+ *
+ * <p>Thứ tự khi tắt (B4): bộ theo dõi dừng <b>sau</b> web server, tức là sau cả lúc tắt êm chờ các request đang chạy,
+ * và <b>trước</b> kết nối Redis (phase 0 của {@code LettuceConnectionFactory}). Với phase mặc định nó dừng đầu tiên: suốt
+ * thời gian tắt êm (tới 20 giây) instance vẫn phục vụ từ L1 mà không còn nhận thông báo hủy. Dừng rồi thì cache
+ * không dùng L1 nữa.
  */
 public final class RedisCacheMonitor implements SmartLifecycle {
+
+    /** Thấp hơn phase dừng web server (dừng sau nó), cao hơn phase 0 của kết nối Redis (dừng trước nó). */
+    public static final int PHASE = WebServerGracefulShutdownLifecycle.SMART_LIFECYCLE_PHASE - 2048;
 
     private static final Logger log = LoggerFactory.getLogger(RedisCacheMonitor.class);
     /** Heartbeat nhận được phải không cũ hơn chừng này nhịp. */
@@ -139,6 +148,13 @@ public final class RedisCacheMonitor implements SmartLifecycle {
         if (current != null) {
             destroy(current);
         }
+        // Không còn nhận thông báo hủy: L1 không được dùng nữa (phòng khi còn request nào chạy sau lúc này)
+        cache.subscriptionStopped();
+    }
+
+    @Override
+    public int getPhase() {
+        return PHASE;
     }
 
     private static void destroy(RedisMessageListenerContainer listenerContainer) {

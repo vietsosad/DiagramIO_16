@@ -2,6 +2,9 @@
 """Cào /actuator/prometheus của app mỗi --interval giây và giữ các số liệu dùng để giải thích kết quả.
 
 Không cần dựng Prometheus: ghi thẳng CSV dạng dài ts,metric,labels,value. Chạy tới khi nhận SIGTERM/SIGINT.
+Nhiều instance (B4): lặp lại --url; mỗi vòng cào hết các URL, mọi dòng của vòng đó cùng một ts, nhãn có thêm
+inst=<cổng> để report.py cộng theo vòng (gauge) và theo từng chuỗi (counter, kể cả khi instance khởi động lại). Một
+instance không trả lời (đã tắt, đang khởi động lại) thì vòng đó thiếu nó.
 Giữ lại:
   http_server_requests_seconds_{count,sum,bucket}  gộp theo method, uri (bỏ status, outcome, exception)
   hikaricp_connections_*                           pool kết nối CSDL (active, idle, pending, max...)
@@ -18,6 +21,7 @@ import re
 import signal
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 KEEP_PREFIXES = ("hikaricp_connections", "tomcat_threads", "jvm_threads_live_threads", "process_cpu_usage",
@@ -52,8 +56,8 @@ def parse(text: str):
         yield name, dict(LABEL.findall(labels)), number
 
 
-def select(samples) -> dict[tuple[str, str], float]:
-    """Giữ số liệu cần thiết; số liệu HTTP được cộng dồn qua các nhãn bị bỏ."""
+def select(samples, instance: str = "") -> dict[tuple[str, str], float]:
+    """Giữ số liệu cần thiết; số liệu HTTP được cộng dồn qua các nhãn bị bỏ. instance: thêm nhãn inst=<instance>."""
     rows: dict[tuple[str, str], float] = {}
     for name, labels, value in samples:
         if name in HTTP:
@@ -68,35 +72,41 @@ def select(samples) -> dict[tuple[str, str], float]:
             key = ";".join(f"{k}={v}" for k, v in sorted(labels.items()) if k not in ("application",))
         else:
             continue
+        if instance:
+            key = f"{key};inst={instance}" if key else f"inst={instance}"
         rows[(name, key)] = rows.get((name, key), 0.0) + value
     return rows
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--url", required=True)
+    parser.add_argument("--url", required=True, action="append", help="lặp lại cho từng instance")
     parser.add_argument("--out", required=True)
     parser.add_argument("--interval", type=float, default=5.0)
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    request = urllib.request.Request(args.url, headers={"Accept": "text/plain"})
+    # Một instance: giữ đúng dạng cũ (không nhãn inst); nhiều instance: nhãn inst là cổng quản trị
+    targets = [(url, "" if len(args.url) == 1 else str(urllib.parse.urlparse(url).port))
+               for url in args.url]
     failures = 0
     with open(args.out, "w", buffering=1) as out:
         out.write("ts,metric,labels,value\n")
         next_at = time.time()
         while running:
             now = time.time()
-            try:
-                with urllib.request.urlopen(request, timeout=3) as response:
-                    text = response.read().decode("utf-8")
-            except OSError as error:
-                failures += 1
-                print(f"prom_scrape: lỗi lần {failures}: {error}", file=sys.stderr)
-            else:
-                ts = f"{now:.3f}"
-                for (name, key), value in sorted(select(parse(text)).items()):
+            ts = f"{now:.3f}"
+            for url, instance in targets:
+                request = urllib.request.Request(url, headers={"Accept": "text/plain"})
+                try:
+                    with urllib.request.urlopen(request, timeout=3) as response:
+                        text = response.read().decode("utf-8")
+                except OSError as error:
+                    failures += 1
+                    print(f"prom_scrape: lỗi lần {failures} ({url}): {error}", file=sys.stderr)
+                    continue
+                for (name, key), value in sorted(select(parse(text), instance).items()):
                     out.write(f'{ts},{name},"{key}",{value:g}\n')
             next_at += args.interval
             while running and time.time() < next_at:

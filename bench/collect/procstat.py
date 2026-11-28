@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Lấy mẫu CPU và bộ nhớ theo nhóm tiến trình, mỗi --interval giây, đọc thẳng /proc (Linux).
 
-Nhóm: app (java chạy app.jar), db (postgres, gồm mọi backend), cache (redis-server), loadgen (k6),
-collector (script đo này), other. Ghi thêm CPU toàn máy (user, system, iowait, steal...) và độ bận từng CPU, để kiểm tra bố trí CPU
-và phát hiện máy ảo bị chiếm CPU (steal). Chạy tới khi nhận SIGTERM/SIGINT.
+Nhóm: app (java chạy app.jar, mọi instance), db (postgres, gồm mọi backend), cache (redis-server), lb (nginx, B4),
+loadgen (k6), collector (script đo này), other. Chạy nhiều instance (B4) thì mỗi instance còn có nhóm riêng
+app_<cổng>, cộng lại bằng app. Ghi thêm CPU toàn máy (user, system, iowait, steal...) và độ bận từng CPU, để kiểm tra
+bố trí CPU và phát hiện máy ảo bị chiếm CPU (steal). Chạy tới khi nhận SIGTERM/SIGINT.
 
 CSV dạng dài: ts,metric,key,value
   cpu_cores,<nhóm>     số CPU nhóm đó dùng trung bình trong khoảng (1.0 = một CPU bận 100%)
@@ -16,11 +17,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import sys
 import time
 
 CLK_TCK = os.sysconf("SC_CLK_TCK")
+SERVER_PORT = re.compile(rb"--server\.port=(\d+)")
 PAGE_MB = os.sysconf("SC_PAGE_SIZE") / 2**20
 STAT_FIELDS = ["user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal"]
 
@@ -33,19 +36,25 @@ def stop(*_):
 
 
 def classify(pid: str, comm: str) -> str:
+    """Nhóm của tiến trình; instance của app có dạng "app_<cổng>" (main() cộng chúng vào nhóm app)."""
     if comm == "postgres":
         return "db"
     if comm == "k6":
         return "loadgen"
     if comm.startswith("redis-server"):
         return "cache"
+    if comm == "nginx":
+        return "lb"
     if comm.startswith("java"):
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
                 cmdline = f.read()
         except OSError:
             return "other"
-        return "app" if b"app.jar" in cmdline else "java_other"
+        if b"app.jar" not in cmdline:
+            return "java_other"
+        port = SERVER_PORT.search(cmdline)
+        return f"app_{port.group(1).decode()}" if port else "app"
     if comm.startswith("python"):
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -118,9 +127,12 @@ def main() -> int:
             for pid, (group, ticks, rss) in procs.items():
                 before = prev_proc.get(pid)
                 delta = ticks - before[1] if before else ticks
-                g = groups.setdefault(group, [0.0, 0.0])
-                g[0] += max(0, delta) / CLK_TCK / elapsed
-                g[1] += rss * PAGE_MB
+                cores = max(0, delta) / CLK_TCK / elapsed
+                # Một instance của app tính cả vào nhóm riêng của nó lẫn nhóm app chung
+                for name in ((group, "app") if group.startswith("app_") else (group,)):
+                    g = groups.setdefault(name, [0.0, 0.0])
+                    g[0] += cores
+                    g[1] += rss * PAGE_MB
             ts = f"{now:.3f}"
             for group in sorted(groups):
                 out.write(f"{ts},cpu_cores,{group},{groups[group][0]:.3f}\n")

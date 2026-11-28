@@ -1,0 +1,135 @@
+{
+  "generator": "bench/seed/gen.py",
+  "generator_version": 1,
+  "seed": 20261123,
+  "scale": 1.0,
+  "python": "3.13.18",
+  "password": "uet123456",
+  "active_users": 200,
+  "counts": {
+    "users": 2000,
+    "diagrams": 50000,
+    "diagram_versions": 148345,
+    "diagram_shares": 20000,
+    "public_diagrams": 5112,
+    "long_history_diagrams": 50
+  },
+  "data_bytes": {
+    "diagrams": 1658655382,
+    "diagram_versions": 1840576188
+  },
+  "data_size_by_class": {
+    "S": {
+      "count": 40179,
+      "mean": 4862,
+      "min": 2205,
+      "p50": 4851,
+      "p90": 6483,
+      "p99": 7208,
+      "max": 8510
+    },
+    "M": {
+      "count": 8825,
+      "mean": 49770,
+      "min": 33156,
+      "p50": 49693,
+      "p90": 61914,
+      "p99": 65267,
+      "max": 67595
+    },
+    "L": {
+      "count": 996,
+      "mean": 1028199,
+      "min": 507101,
+      "p50": 1031824,
+      "p90": 1429756,
+      "p99": 1516108,
+      "max": 1530383
+    }
+  },
+  "versions_per_diagram": {
+    "count": 50000,
+    "mean": 3,
+    "min": 0,
+    "p50": 2,
+    "p90": 7,
+    "p99": 15,
+    "max": 389
+  },
+  "diagrams_per_owner": {
+    "count": 2000,
+    "mean": 25,
+    "min": 0,
+    "p50": 9,
+    "p90": 36,
+    "p99": 287,
+    "max": 4248
+  },
+  "owners_with_1000_plus": 4,
+  "fixture_sizes": {
+    "users": 200,
+    "diagrams": 31723,
+    "history": 22645,
+    "public": 5112,
+    "shares": 20000,
+    "words": 40
+  },
+  "files": {
+    "csv/users.tsv": {
+      "bytes": 374000,
+      "rows": 2000,
+      "sha256": "b8b5c55471e329cb332a8fccd73cf04a10246a5d769eb94b79e91de42b7a3c5e"
+    },
+    "csv/diagrams.tsv": {
+      "bytes": 1668250712,
+      "rows": 50000,
+      "sha256": "636fd4b75d3f5f6a4e29f786f2b2cf27e49cebcd26b9a72b505a60db46307178"
+    },
+    "csv/diagram_versions.tsv": {
+      "bytes": 1861410356,
+      "rows": 148345,
+      "sha256": "7b617e89fbb7c71fde58e7c67e3a973472ca39ecb7b30648ffc94b9800c566f2"
+    },
+    "csv/diagram_shares.tsv": {
+      "bytes": 3020000,
+      "rows": 20000,
+      "sha256": "8432e3b4b451a0d9346d831545e1bb9cd7a2e0f3e0ebbe91bb1de187454a1098"
+    },
+    "fixtures/users.json": {
+      "bytes": 20559,
+      "rows": 0,
+      "sha256": "62bcae16264189ee06b4047dff8abfb4b39f8aa455f38ce07202118424784eee"
+    },
+    "fixtures/diagrams.json": {
+      "bytes": 4847131,
+      "rows": 0,
+      "sha256": "37bad5b5f89f2a5801c132c69b96111ed20c9917e156f2ee59fcab39dbaf2993"
+    },
+    "fixtures/history.json": {
+      "bytes": 2638672,
+      "rows": 0,
+      "sha256": "1b0e7c9ef5d2c184d8ff41584bbdfa95e3cceccc95b7c2a87492686039b61d1e"
+    },
+    "fixtures/public.json": {
+      "bytes": 276049,
+      "rows": 0,
+      "sha256": "fc58afa1005e90e79f26e6645cef2ead642e22c71b0be4542990760e9ad7ce85"
+    },
+    "fixtures/shares.json": {
+      "bytes": 2400001,
+      "rows": 0,
+      "sha256": "7227209aab87f5e704004a8d648fe967b5ba68790886d9ad24ceab4ef7853c01"
+    },
+    "fixtures/words.json": {
+      "bytes": 390,
+      "rows": 0,
+      "sha256": "6943b7d67715b9474006492e8a7c321e9bcec7219ca1ddd6b0eba1d7927a0b89"
+    },
+    "fixtures/payloads.json": {
+      "bytes": 3976859,
+      "rows": 0,
+      "sha256": "ec2d320bb7606e85e0df926edc37fd1d68c4a7f36611368be8369c207b9e830d"
+    }
+  },
+  "seconds": 125.4
+}

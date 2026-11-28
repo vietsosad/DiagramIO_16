@@ -4,7 +4,8 @@
 #
 #   bash bench/kaggle/setup.sh
 #
-# Cài: PostgreSQL $PG_MAJOR (kho PGDG, có pg_stat_statements và pg_prewarm), Redis, JDK Temurin, k6, async-profiler.
+# Cài: PostgreSQL $PG_MAJOR (kho PGDG, có pg_stat_statements và pg_prewarm), Redis, Nginx, JDK Temurin, k6,
+# async-profiler.
 # Cấu hình PostgreSQL một lần ở đây và dùng chung cho mọi cấu hình được đo.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
@@ -131,6 +132,28 @@ redis_cli shutdown nosave > /dev/null 2>&1 || true
 sleep 1
 ensure_redis
 
+# ---- Nginx (B4): bản stable của nginx.org, cùng dòng với image nginx:1.28-alpine của docker-compose.scale.yml
+# (cần từ 1.27.4 cho keepalive_min_timeout). Kho đó không dùng được thì dùng bản của hệ điều hành; lb_config trong
+# env.sh bỏ chỉ thị mà bản cũ không có, và env.txt ghi phiên bản thật.
+if ! command -v "$NGINX" > /dev/null; then
+  log "Cài Nginx (nginx.org, stable)"
+  if curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor --yes -o /usr/share/keyrings/nginx-archive-keyring.gpg; then
+    echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/$ID $CODENAME nginx" \
+      > /etc/apt/sources.list.d/nginx.list
+    # Ưu tiên kho nginx.org hơn bản của hệ điều hành (cùng tên gói nginx)
+    printf 'Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n' > /etc/apt/preferences.d/99nginx
+    apt_update
+  else
+    log "CẢNH BÁO: không thêm được kho nginx.org"
+  fi
+  apt-get install -y -qq --no-install-recommends nginx > /dev/null || true
+fi
+command -v "$NGINX" > /dev/null || die "cài Nginx thất bại"
+# Gói có thể đã tự bật Nginx với cấu hình mặc định (cổng 80): mỗi lần chạy bộ đo tự bật Nginx của nó (env.sh, start_lb)
+if pgrep -x nginx > /dev/null; then
+  "$NGINX" -s quit 2> /dev/null || pkill -x nginx || true
+fi
+
 # ---- Công cụ tải về, có kiểm tra SHA-256 khi bản phát hành có công bố
 download() {  # download <url> <file>; thử lại cả khi đường truyền đứt giữa chừng
   curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$2" "$1"
@@ -177,4 +200,5 @@ log "Sẵn sàng:"
 "$ASPROF" --version 2>&1 | head -1
 pg_admin -d postgres -At -c "SELECT version()"
 redis-server --version
+"$NGINX" -v 2>&1
 log "CPU hệ thống được đo: $SUT_CPUS; CPU tạo tải: $LOADGEN_CPUS"

@@ -433,6 +433,15 @@ public final class DiagramCache {
         }
     }
 
+    /** Bộ theo dõi đã dừng (app đang tắt): không còn ai nhận thông báo hủy, nên thôi dùng L1. */
+    public synchronized void subscriptionStopped() {
+        if (local != null && remote != null && localTrusted) {
+            localTrusted = false;
+            resetLocal();
+            log.info("Đã dừng nhận pub/sub của cache sơ đồ: ngừng dùng L1");
+        }
+    }
+
     /** Lệnh Redis gửi ở trạng thái {@code state} bị lỗi: ngừng dùng L2, trừ khi trạng thái đã đổi kể từ đó. */
     private void remoteFailed(RuntimeException e, long state) {
         remoteError.increment();

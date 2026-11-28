@@ -65,6 +65,16 @@ class ManagementEndpointsE2eTest extends E2eTestBase {
     }
 
     @Test
+    void livenessAndReadinessProbesAreOnTheManagementPortOnly() {
+        for (String probe : new String[]{"/actuator/health/liveness", "/actuator/health/readiness"}) {
+            Res res = get(management(probe)).send();
+            assertStatus(res, 200);
+            assertThat(res.json().path("status").asText()).as(probe).isEqualTo("UP");
+            assertStatus(get(probe).send(), 401);   // cổng API: như mọi endpoint Actuator khác
+        }
+    }
+
+    @Test
     void otherActuatorEndpointsAreNotExposed() {
         for (String path : new String[]{"/actuator", "/actuator/env", "/actuator/beans", "/actuator/heapdump",
                 "/actuator/metrics", "/actuator/loggers"}) {

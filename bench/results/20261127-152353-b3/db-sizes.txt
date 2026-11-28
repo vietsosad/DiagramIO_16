@@ -1,0 +1,6 @@
+diagram_versions 605 MB 634068992
+diagrams 475 MB 498393088
+diagram_shares 5864 kB 6004736
+users 648 kB 663552
+flyway_schema_history 80 kB 81920
+refresh_tokens 24 kB 24576

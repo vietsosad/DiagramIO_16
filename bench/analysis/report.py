@@ -116,19 +116,32 @@ class Run:
         return max(values) if values else None
 
     def gauge(self, metric: str, window, agg=statistics.fmean) -> float | None:
+        """Gộp mọi mẫu của mọi chuỗi (với nhiều instance: giá trị của từng instance, ví dụ heap lớn nhất)."""
         values = [v for (m, _), points in self.prom.items() if m == metric
                   for ts, v in points if window[0] <= ts <= window[1]]
         return agg(values) if values else None
 
+    def gauge_total(self, metric: str, window, agg=statistics.fmean) -> float | None:
+        """Cộng các chuỗi của cùng một vòng cào (mọi instance, cùng ts) rồi gộp theo thời gian: tổng số kết nối
+        CSDL, luồng Tomcat của cả hệ thống. Một instance thì như gauge()."""
+        per_round: dict[float, float] = defaultdict(float)
+        for (m, _), points in self.prom.items():
+            if m == metric:
+                for ts, v in points:
+                    if window[0] <= ts <= window[1]:
+                        per_round[ts] += v
+        return agg(per_round.values()) if per_round else None
+
     def counter_delta(self, metric: str, window, label_filter=lambda labels: True) -> float | None:
-        """Hiệu của bộ đếm cộng dồn giữa mẫu đầu và mẫu cuối trong cửa sổ, cộng qua các chuỗi nhãn."""
+        """Phần tăng của bộ đếm cộng dồn trong cửa sổ, cộng qua các chuỗi nhãn (và các instance). Giá trị giảm
+        nghĩa là instance đã khởi động lại và đếm lại từ 0 (W7): phần tăng từ đó là chính giá trị mới."""
         total, found = 0.0, False
         for (m, labels), points in self.prom.items():
             if m != metric or not label_filter(labels):
                 continue
-            inside = [(ts, v) for ts, v in points if window[0] <= ts <= window[1]]
+            inside = [v for ts, v in points if window[0] <= ts <= window[1]]
             if len(inside) >= 2:
-                total += inside[-1][1] - inside[0][1]
+                total += sum(b - a if b >= a else b for a, b in zip(inside, inside[1:]))
                 found = True
         return total if found else None
 
@@ -147,9 +160,9 @@ class Run:
             if m != "http_server_requests_seconds_bucket" or not not_actuator(labels):
                 continue
             le = re.search(r"le=([^;]+)", labels)
-            inside = [(ts, v) for ts, v in points if window[0] <= ts <= window[1]]
+            inside = [v for ts, v in points if window[0] <= ts <= window[1]]
             if le and len(inside) >= 2:
-                buckets[le.group(1)] += inside[-1][1] - inside[0][1]
+                buckets[le.group(1)] += sum(b - a if b >= a else b for a, b in zip(inside, inside[1:]))
         return mean, histogram_quantile(buckets, 0.95)
 
 
@@ -196,7 +209,11 @@ def pg_totals(run: Run) -> dict:
 def run_metrics(run: Run) -> dict:
     m: dict = {"run": run.meta["run"], "config": run.cfg, "workload": run.workload, "mode": run.mode,
                "level": run.level, "rep": run.rep, "status": run.meta["status"], "profiled": run.meta["profiled"],
-               "k6_exit": run.meta["k6_exit"], "git_sha": run.meta.get("git_sha")}
+               "k6_exit": run.meta["k6_exit"], "git_sha": run.meta.get("git_sha"),
+               # B4: số instance sau Nginx (0: một app nghe thẳng), sự cố của W7 (kill, rolling)
+               "instances": run.meta.get("instances") or 0, "incident": run.meta.get("incident"),
+               "heap_mb_per_instance": run.meta.get("heap_mb_per_instance"),
+               "pool_per_instance": run.meta.get("pool_per_instance")}
     d = "http_req_duration{phase:measure}"
     count = run.value("http_reqs{phase:measure}", "count", 0) or 0
     m.update(count=count, p50=run.value(d, "med"), p95=run.value(d, "p(95)"), p99=run.value(d, "p(99)"),
@@ -219,7 +236,8 @@ def run_metrics(run: Run) -> dict:
     window = run.window
     if window and run.mode != "capacity":
         sut = [f"cpu{c}" for c in str(run.meta.get("sut_cpus", "")).split(",") if c != ""]
-        for group in ("app", "db", "cache", "loadgen"):
+        # app: tổng các instance; lb: Nginx (B4)
+        for group in ("app", "db", "cache", "loadgen", "lb"):
             m[f"cpu_{group}"] = run.proc_mean("cpu_cores", group, window)
         m["loadgen_max"] = run.proc_max("cpu_cores", "loadgen", window)
         m["steal"] = run.proc_mean("system_pct", "steal", window)
@@ -227,10 +245,11 @@ def run_metrics(run: Run) -> dict:
         busy = [b for b in busy if b is not None]
         m["sut_busy"] = statistics.fmean(busy) if busy else None
         m["srv_mean"], m["srv_p95"] = run.server_latency(window)
-        m["hikari_active"] = run.gauge("hikaricp_connections_active", window)
-        m["hikari_pending_max"] = run.gauge("hikaricp_connections_pending", window, max)
-        m["tomcat_busy"] = run.gauge("tomcat_threads_busy_threads", window)
-        m["tomcat_busy_max"] = run.gauge("tomcat_threads_busy_threads", window, max)
+        # Tổng của mọi instance ở cùng một thời điểm
+        m["hikari_active"] = run.gauge_total("hikaricp_connections_active", window)
+        m["hikari_pending_max"] = run.gauge_total("hikaricp_connections_pending", window, max)
+        m["tomcat_busy"] = run.gauge_total("tomcat_threads_busy_threads", window)
+        m["tomcat_busy_max"] = run.gauge_total("tomcat_threads_busy_threads", window, max)
         gc = run.counter_delta("jvm_gc_pause_seconds_sum", window)
         span = run.prom_span(window)
         m["gc_ms_per_s"] = 1000.0 * gc / span if gc is not None and span else None
@@ -311,6 +330,15 @@ def step_passes(step: dict, slo: float) -> bool:
             and step["achieved"] >= SLO_ACHIEVED * step["target"])
 
 
+def level_passes(ms: list[dict], slo: float = 100.0) -> bool:
+    """Các lần lặp của một mức tải cố định: trung vị p95 giữ SLO và đạt tốc độ đến yêu cầu."""
+    p95 = spread([m.get("p95") for m in ms])
+    rps = spread([m.get("rps") for m in ms])
+    target = ms[0].get("target") if ms else None
+    return (p95 is not None and p95[0] <= slo
+            and (target is None or (rps is not None and rps[0] >= SLO_ACHIEVED * target)))
+
+
 def capacity_of(steps: list[dict], slo: float) -> float | None:
     """Tốc độ của bậc cuối cùng còn đạt SLO, tính liên tục từ bậc đầu (bậc lỗi đầu tiên chặn các bậc sau)."""
     best = None
@@ -344,7 +372,11 @@ def validity(m: dict) -> list[str]:
         issues.append(f"vượt sức chứa: chỉ đạt {m['rps']:.0f}/{m['target']:.0f} req/s")
     elif m["mode"] == "fixed" and m["target"] and m["dropped"] > DROPPED_LIMIT * m["target"] * (m["measure_s"] or 1):
         issues.append(f"{m['dropped']:.0f} iteration bị bỏ (thiếu VU sẵn sàng)")
-    if m["mode"] == "fixed" and m.get("cpu_app_drift") is not None and m["cpu_app_drift"] > WARM_DRIFT_LIMIT:
+    # W7: instance bật lại giữa pha đo ấm lại từ đầu, CPU đầu và cuối pha đo không so được; lỗi và 409 trong lúc có sự
+    # cố là kết quả của phép đo (mục sự cố của báo cáo), không phải lỗi bộ đo
+    incident = bool(m.get("incident"))
+    if (m["mode"] == "fixed" and not incident and m.get("cpu_app_drift") is not None
+            and m["cpu_app_drift"] > WARM_DRIFT_LIMIT):
         issues.append(f"CPU app ở phần ba đầu pha đo cao hơn phần ba cuối {100 * m['cpu_app_drift']:.0f}%: "
                       "JVM chưa ấm hết sau warm-up (tăng WARMUP)")
     if m.get("l2_errors"):
@@ -359,7 +391,7 @@ def validity(m: dict) -> list[str]:
         issues.append(f"{m['fallbacks']:.0f} thao tác phải đổi sang đọc vì phân vùng của VU không có dữ liệu phù hợp (giảm MAX_VUS hoặc tăng SCALE)")
     if m.get("checkpoints"):
         issues.append(f"{m['checkpoints']:.0f} checkpoint giữa lần đo")
-    if m["mode"] != "capacity" and m["err"] and m["err"] >= SLO_ERROR_RATE:
+    if m["mode"] != "capacity" and not incident and m["err"] and m["err"] >= SLO_ERROR_RATE:
         issues.append(f"lỗi {100 * m['err']:.2f}%")
     return issues
 
@@ -399,6 +431,11 @@ def level_key(level: str):
         return (0, float(level))
     except ValueError:
         return (1, level)
+
+
+def workload_name(workload: str) -> str:
+    """Tên kịch bản như trong tài liệu: W2, W7, W7r."""
+    return workload[:2].upper() + workload[2:]
 
 
 # ----------------------------------------------------------------------------- biểu đồ
@@ -450,7 +487,7 @@ def chart_capacity(plt, out: Path, workload: str, runs: list[dict], configs: lis
     ax.set_xlim(left=0)
     ax.set_xlabel("Throughput đạt được (request/giây)")
     ax.set_ylabel("p95 (ms)")
-    ax.set_title(f"{workload.upper()}: độ trễ p95 theo tải (trung vị các lần lặp)", loc="left")
+    ax.set_title(f"{workload_name(workload)}: độ trễ p95 theo tải (trung vị các lần lặp)", loc="left")
     if len(configs) > 1:
         ax.legend(loc="upper left")
     name = f"capacity_{workload}.png"
@@ -479,7 +516,7 @@ def chart_fixed(plt, out: Path, workload: str, groups: dict, configs: list[str],
     ax.set_ylim(bottom=0)
     ax.set_xlabel("Tốc độ đến (request/giây)")
     ax.set_ylabel("p95 (ms), vạch: min–max các lần lặp")
-    ax.set_title(f"{workload.upper()}: p95 ở tải cố định", loc="left")
+    ax.set_title(f"{workload_name(workload)}: p95 ở tải cố định", loc="left")
     if len(configs) > 1:
         ax.legend(loc="upper left")
     name = f"fixed_{workload}.png"
@@ -490,22 +527,24 @@ def chart_fixed(plt, out: Path, workload: str, groups: dict, configs: list[str],
 
 
 def chart_ops(plt, out: Path, workload: str, level: str, per_config: dict, configs: list[str]) -> str:
+    # Màu theo vị trí trong mọi cấu hình của phiên (cùng màu ở mọi biểu đồ), chỉ vẽ cấu hình có số liệu
+    shown = [c for c in configs if per_config.get(c)]
     ops = sorted({op for d in per_config.values() for op in d},
-                 key=lambda op: -(per_config.get(configs[0], {}).get(op) or 0))
-    fig, ax = plt.subplots(figsize=(7.5, 0.42 * len(ops) * max(1, len(configs)) + 1.2))
-    height = 0.8 / max(1, len(configs))
-    for k, cfg in enumerate(configs):
+                 key=lambda op: -(per_config.get(shown[0], {}).get(op) or 0))
+    fig, ax = plt.subplots(figsize=(7.5, 0.42 * len(ops) * max(1, len(shown)) + 1.2))
+    height = 0.8 / max(1, len(shown))
+    for k, cfg in enumerate(shown):
         values = [per_config.get(cfg, {}).get(op) or 0 for op in ops]
         ys = [i + k * height for i in range(len(ops))]
         ax.barh(ys, values, height=height, color=color_of(configs, cfg), edgecolor=SURFACE, linewidth=2,
                 label=cfg)
-    ax.set_yticks([i + height * (len(configs) - 1) / 2 for i in range(len(ops))])
+    ax.set_yticks([i + height * (len(shown) - 1) / 2 for i in range(len(ops))])
     ax.set_yticklabels(ops)
     ax.invert_yaxis()
     ax.grid(axis="y", visible=False)
     ax.set_xlabel("p95 (ms)")
-    ax.set_title(f"{workload.upper()} ở {level} req/s: p95 theo thao tác", loc="left")
-    if len(configs) > 1:
+    ax.set_title(f"{workload_name(workload)} ở {level} req/s: p95 theo thao tác", loc="left")
+    if len(shown) > 1:
         ax.legend(loc="lower right")
     name = f"ops_{workload}_{level}.png"
     fig.tight_layout()
@@ -515,16 +554,18 @@ def chart_ops(plt, out: Path, workload: str, level: str, per_config: dict, confi
 
 
 def chart_cpu(plt, out: Path, workload: str, groups: dict, configs: list[str]) -> str:
-    labels, parts = [], {"app": [], "db": [], "cache": [], "loadgen": []}
+    labels, parts = [], {"app": [], "db": [], "cache": [], "lb": [], "loadgen": []}
     for (cfg, level) in sorted(groups, key=lambda k: (configs.index(k[0]), level_key(k[1]))):
         ms = groups[(cfg, level)]
         labels.append(f"{cfg}\n{level}" if len(configs) > 1 else str(level))
         for g in parts:
             s = spread([m.get(f"cpu_{g}") for m in ms])
             parts[g].append(s[0] if s else 0)
-    fig, ax = plt.subplots(figsize=(7.5, 4.2))
+    if not any(parts["lb"]):
+        del parts["lb"]   # phiên không có Nginx: giữ màu và chú thích như các phiên trước
+    fig, ax = plt.subplots(figsize=(max(7.5, 0.9 * len(labels) + 1.5), 4.2))
     bottom = [0.0] * len(labels)
-    names = {"app": "app (JVM)", "db": "PostgreSQL", "cache": "Redis", "loadgen": "k6"}
+    names = {"app": "app (JVM, mọi instance)", "db": "PostgreSQL", "cache": "Redis", "lb": "Nginx", "loadgen": "k6"}
     for k, g in enumerate(parts):
         ax.bar(range(len(labels)), parts[g], bottom=bottom, color=SERIES[k], edgecolor=SURFACE, linewidth=2,
                label=names[g], width=0.6)
@@ -534,13 +575,151 @@ def chart_cpu(plt, out: Path, workload: str, groups: dict, configs: list[str]) -
     ax.grid(axis="x", visible=False)
     ax.set_xlabel("Mức tải" if workload != "w1" else "Số VU")
     ax.set_ylabel("CPU (số nhân, trung bình pha đo)")
-    ax.set_title(f"{workload.upper()}: CPU theo tiến trình", loc="left")
+    ax.set_title(f"{workload_name(workload)}: CPU theo tiến trình", loc="left")
     ax.legend(loc="upper left")
     name = f"cpu_{workload}.png"
     fig.tight_layout()
     fig.savefig(out / name, dpi=130)
     plt.close(fig)
     return name
+
+
+# ----------------------------------------------------------------------------- sự cố (W7, B4)
+
+INCIDENT_TAIL_S = 10   # cửa sổ sự cố kéo dài thêm 10 giây sau sự kiện cuối (instance vừa nhận lại traffic)
+EVENT_NAMES = {"kill": "kill -9", "start": "bật lại", "ready": "sẵn sàng", "drain": "Nginx thôi gửi",
+               "stop": "tắt êm", "undrain": "nhận lại traffic"}
+
+
+def incident_metrics(run_dir: Path, window) -> dict | None:
+    """Số liệu từng giây phía Nginx (timeline.csv) quanh các sự kiện của incidents.csv, chỉ trong pha đo."""
+    timeline = [{k: num(v) for k, v in r.items()} for r in read_csv(run_dir / "timeline.csv")]
+    events = [(num(r["ts"]), r["event"], r["instance"]) for r in read_csv(run_dir / "incidents.csv")]
+    if not timeline or not events or window is None:
+        return None
+    w0, w1 = window
+    seconds = [r for r in timeline if w0 <= r["ts"] < w1]
+    first, last = events[0][0], events[-1][0]
+    before = [r for r in seconds if r["ts"] + 1 <= first]
+    during = [r for r in seconds if first - 1 < r["ts"] <= last + INCIDENT_TAIL_S]
+    after = [r for r in seconds if r["ts"] > last + INCIDENT_TAIL_S]
+    baseline = statistics.median([r["p99_ms"] for r in before]) if before else None
+    # Một giây "xấu": Nginx trả lỗi 5xx, hoặc p99 của giây đó vượt cả SLO lẫn 2 lần p99 bình thường
+    threshold = max(100.0, 2 * baseline) if baseline else 100.0
+    bad = [r for r in during if r["r5xx"] > 0 or r["p99_ms"] > threshold]
+    kill = next((ts for ts, event, _ in events if event == "kill"), None)
+    restart = next((ts for ts, event, _ in events if event == "start"), None)
+    recovery = None
+    if kill is not None:
+        # Từ lúc kill tới hết giây xấu cuối cùng trước khi instance được bật lại
+        down = [r for r in bad if kill - 1 < r["ts"] < (restart or w1)]
+        recovery = max(0.0, down[-1]["ts"] + 1 - kill) if down else 0.0
+    total = lambda rows, key: sum(r.get(key, 0) for r in rows)   # noqa: E731
+    return {
+        "events": events, "seconds": seconds, "w0": w0, "baseline_p99": baseline, "threshold": threshold,
+        "requests": total(seconds, "requests"), "r5xx": total(seconds, "r5xx"),
+        "post_5xx": total(seconds, "post_5xx"), "r409": total(seconds, "r409"), "retried": total(seconds, "retried"),
+        "window_requests": total(during, "requests"), "window_5xx": total(during, "r5xx"),
+        "window_s": (last + INCIDENT_TAIL_S) - first, "bad_seconds": len(bad), "recovery_s": recovery,
+        "p99_before": baseline,
+        "p99_during_max": max((r["p99_ms"] for r in during), default=None),
+        "p99_after": statistics.median([r["p99_ms"] for r in after]) if after else None,
+    }
+
+
+def chart_incident(plt, out: Path, name: str, inc: dict, slo: float) -> str:
+    seconds, w0 = inc["seconds"], inc["w0"]
+    xs = [r["ts"] + 0.5 - w0 for r in seconds]   # giữa giây của mỗi dòng (request kết thúc trong giây đó)
+    ports = sorted({k for r in seconds for k in r if k.startswith("served_")})
+    fig, (top, bottom) = plt.subplots(2, 1, figsize=(8.5, 5.6), sharex=True, gridspec_kw={"height_ratios": [1, 1.2]})
+    top.plot(xs, [r["p99_ms"] for r in seconds], color=SERIES[0], linewidth=1.5, label="p99 từng giây")
+    top.axhline(slo, color=INK_2, linewidth=1)
+    top.annotate(f"SLO {slo:.0f} ms", xy=(0.01, slo), xycoords=("axes fraction", "data"), xytext=(0, 4),
+                 textcoords="offset points", color=INK_2, fontsize=9)
+    top.set_ylabel("p99 (ms, phía Nginx)")
+    top.set_ylim(bottom=0)
+    for k, port in enumerate(ports):
+        bottom.plot(xs, [r.get(port, 0) for r in seconds], color=SERIES[(k + 1) % len(SERIES)], linewidth=1.5,
+                    label=f"instance cổng {port.removeprefix('served_')}")
+    # Request Nginx phải gửi sang instance khác (instance đầu lỗi kết nối) và lỗi 5xx client nhận, dạng cột
+    retried = [(x, r["retried"]) for x, r in zip(xs, seconds) if r.get("retried")]
+    if retried:
+        bottom.bar([x for x, _ in retried], [v for _, v in retried], width=1.0, color=SERIES[3], label="Nginx gửi lại")
+    errors = [(x, r["r5xx"]) for x, r in zip(xs, seconds) if r["r5xx"]]
+    if errors:
+        bottom.bar([x for x, _ in errors], [e for _, e in errors], width=1.0, color=SERIES[7], label="lỗi 5xx")
+    bottom.set_ylabel("request/giây")
+    bottom.set_xlabel("giây kể từ đầu pha đo")
+    bottom.set_ylim(bottom=0)
+    drains = {i: ts for ts, event, i in inc["events"] if event == "drain"}
+    if drains:
+        # Khởi động lại cuốn chiếu: các sự kiện của một instance cách nhau vài giây, nên tô cả khoảng instance đó nằm
+        # ngoài Nginx (từ lúc thôi gửi tới lúc nhận lại traffic) thay vì vẽ từng vạch
+        undrains = {i: ts for ts, event, i in inc["events"] if event == "undrain"}
+        for i, start in drains.items():
+            end = undrains.get(i, start)
+            for ax in (top, bottom):
+                ax.axvspan(start - w0, end - w0, color=GRID, alpha=0.6, linewidth=0)
+            top.annotate(f"instance {i} ngoài Nginx", xy=(start - w0, 1), xycoords=("data", "axes fraction"),
+                         xytext=(3, -3), textcoords="offset points", va="top", fontsize=8, color=INK_2)
+    else:
+        for ts, event, instance in inc["events"]:
+            for ax in (top, bottom):
+                ax.axvline(ts - w0, color=MUTED, linewidth=1, linestyle="--")
+            top.annotate(f"{EVENT_NAMES.get(event, event)} {instance}", xy=(ts - w0, 1),
+                         xycoords=("data", "axes fraction"), xytext=(2, -2), textcoords="offset points", rotation=90,
+                         va="top", fontsize=8, color=INK_2)
+    top.set_title(f"{name}: độ trễ và phân phối request quanh sự cố", loc="left")
+    bottom.legend(loc="lower left", fontsize=8, ncol=4)
+    file = f"incident_{name}.png"
+    fig.tight_layout()
+    fig.savefig(out / file, dpi=130)
+    plt.close(fig)
+    return file
+
+
+def incident_section(session: Path, runs: list[dict], plt, charts_dir: Path) -> list[str]:
+    lines = ["## Sự cố: một instance chết, khởi động lại cuốn chiếu (W7, B4)", "",
+             "Số liệu phía Nginx từng giây (`timeline.csv`, từ log truy cập), chỉ trong pha đo. Cửa sổ sự cố: từ sự "
+             f"kiện đầu tới {INCIDENT_TAIL_S} giây sau sự kiện cuối. Giây xấu: Nginx trả 5xx, hoặc p99 của giây đó "
+             "vượt cả SLO 100 ms lẫn 2 lần p99 trước sự cố. Hồi phục: từ lúc `kill -9` tới hết giây xấu cuối cùng "
+             "trước khi instance được bật lại. \"Gửi lại\": request Nginx chuyển sang instance khác khi instance đầu "
+             "lỗi; POST và PATCH chỉ được chuyển khi chưa gửi được (lỗi lúc kết nối), đã gửi thì không bao giờ gửi "
+             "lại. PUT đã ghi xong ở instance chết rồi được gửi lại thì nhận 409 (VU đọc lại version).", "",
+             "| Lần chạy | Sự cố | Request | Lỗi 5xx (POST, PATCH) | 409 | Gửi lại | Lỗi trong cửa sổ sự cố | "
+             "Giây xấu | Hồi phục (s) | p99 trước / lớn nhất trong / sau (ms) | Lỗi phía k6 |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    charts = []
+    for m in sorted(runs, key=lambda m: (m["config"], m["workload"], m["rep"])):
+        run = Run(session / m["run"])
+        inc = incident_metrics(run.dir, run.window)
+        if inc is None:
+            lines.append(f"| `{m['run']}` | {m['incident']} | thiếu timeline.csv hoặc incidents.csv | | | | | | | | |")
+            continue
+        kind = "kill -9 rồi bật lại" if m["incident"] == "kill" else "khởi động lại cuốn chiếu"
+        rate = 100.0 * inc["window_5xx"] / inc["window_requests"] if inc["window_requests"] else 0.0
+        recovery = fmt(inc["recovery_s"], 0) if inc["recovery_s"] is not None else "–"
+        lines.append(
+            f"| `{m['run']}` | {kind} | {inc['requests']:.0f} | {inc['r5xx']:.0f} ({inc['post_5xx']:.0f}) | "
+            f"{inc['r409']:.0f} | {inc['retried']:.0f} | {rate:.2f}% ({inc['window_5xx']:.0f}/{inc['window_requests']:.0f} "
+            f"trong {inc['window_s']:.0f} s) | {inc['bad_seconds']} | {recovery} | "
+            f"{fmt(inc['p99_before'])} / {fmt(inc['p99_during_max'])} / {fmt(inc['p99_after'])} | "
+            f"{100 * m['err']:.2f}% |")
+        if plt and m["rep"] == min(r["rep"] for r in runs if r["config"] == m["config"] and r["workload"] == m["workload"]):
+            charts.append(chart_incident(plt, charts_dir, m["run"], inc, 100.0))
+    lines.append("")
+    lines += ["Sự kiện (giây kể từ đầu pha đo):", ""]
+    for m in sorted(runs, key=lambda m: (m["config"], m["workload"], m["rep"])):
+        run = Run(session / m["run"])
+        events = [(num(r["ts"]), r["event"], r["instance"]) for r in read_csv(run.dir / "incidents.csv")]
+        if events and run.window:
+            text = ", ".join(f"{ts - run.window[0]:.1f} {EVENT_NAMES.get(e, e)} {i}" for ts, e, i in events)
+            lines.append(f"- `{m['run']}`: {text}")
+    lines.append("")
+    lines += [f"![{c}](charts/{c})" for c in charts]
+    if charts:
+        lines.append("")
+    return lines
 
 
 # ----------------------------------------------------------------------------- báo cáo
@@ -557,7 +736,7 @@ def env_summary(session: Path) -> list[str]:
     threads = grab(r"^Thread\(s\) per core:\s*(\d+)$")
     memory = grab(r"^Mem:\s+(\S+)")
     os_name = grab(r'PRETTY_NAME="?([^"]+)')
-    sut = grab(r"hệ thống được đo \(app, PostgreSQL\): (.+)$")
+    sut = grab(r"hệ thống được đo \([^)]*\): (.+)$")
     loadgen = grab(r"tạo tải và thu số liệu \(k6, bench/collect\): (.+)$")
     java = grab(r"^(openjdk version .+)$")
     k6 = grab(r"^(k6 v\S+)")
@@ -588,6 +767,12 @@ def write_report(session: Path, metrics: list[dict]) -> Path:
                 parts = line.split(maxsplit=3)   # cấu hình, ref, commit, [tham số app]
                 cfg, ref, sha = parts[:3]
                 args = f", tham số `{parts[3]}`" if len(parts) > 3 else ""
+                scaled = next((m for m in metrics if m["config"] == cfg and m.get("instances")), None)
+                if scaled:
+                    args += f"; {scaled['instances']} instance sau Nginx"
+                    if scaled.get("heap_mb_per_instance"):
+                        args += (f", mỗi instance heap {scaled['heap_mb_per_instance']} MB, pool "
+                                 f"{scaled['pool_per_instance']} kết nối")
                 lines.append(f"- Cấu hình {cfg}: `{ref}` (commit `{sha[:10]}`){args}")
     explain_lines = explain_tables(session)
     manifest_path = session / "manifest.json"
@@ -618,7 +803,7 @@ def write_report(session: Path, metrics: list[dict]) -> Path:
 
     for workload in sorted(by_workload):
         runs = by_workload[workload]
-        lines += [f"## {workload.upper()}", ""]
+        lines += [f"## {workload_name(workload)}", ""]
 
         capacity = [m for m in runs if m["mode"] == "capacity"]
         if capacity:
@@ -653,17 +838,21 @@ def write_report(session: Path, metrics: list[dict]) -> Path:
             title = "Mô hình tải đóng (số VU cố định, không nghỉ)" if closed else "Độ trễ ở tốc độ đến cố định"
             lines += [f"### {title}", "", "Trung vị (min–max) qua các lần lặp, chỉ tính pha đo.", ""]
             head = "VU" if closed else "Tốc độ đến"
+            # Cột Nginx chỉ khi phiên có cấu hình chạy sau Nginx (B4); CPU app là tổng các instance
+            with_lb = any(m.get("cpu_lb") for m in fixed)
+            lb_head, lb_sep = (" CPU Nginx |", "---|") if with_lb else ("", "")
             lines += [f"| Cấu hình | {head} | Throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | Lỗi | "
-                      "CPU app | CPU PostgreSQL | CPU Redis | CPU k6 | Server trung bình (ms) | SQL/request | Khối TOAST/request | "
-                      "Trúng cache | 304 |",
-                      "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+                      f"CPU app | CPU PostgreSQL | CPU Redis |{lb_head} CPU k6 | Server trung bình (ms) | SQL/request | "
+                      "Khối TOAST/request | Trúng cache | 304 |",
+                      "|---|---|---|---|---|---|---|---|---|---|" + lb_sep + "---|---|---|---|---|---|"]
             for (cfg, level) in sorted(groups, key=lambda k: (configs.index(k[0]), level_key(k[1]))):
                 ms = groups[(cfg, level)]
                 g = lambda key: spread([m.get(key) for m in ms])   # noqa: E731
+                lb_cell = f" {fmt(g('cpu_lb'), 2)} |" if with_lb else ""
                 lines.append(
                     f"| {cfg} | {level} | {fmt(g('rps'), 0)} | {fmt(g('p50'))} | {fmt(g('p95'))} | {fmt(g('p99'))} | "
                     f"{fmt(spread([100 * m['err'] for m in ms]), 2, '%')} | {fmt(g('cpu_app'), 2)} | "
-                    f"{fmt(g('cpu_db'), 2)} | {fmt(g('cpu_cache'), 2)} | {fmt(g('cpu_loadgen'), 2)} | "
+                    f"{fmt(g('cpu_db'), 2)} | {fmt(g('cpu_cache'), 2)} |{lb_cell} {fmt(g('cpu_loadgen'), 2)} | "
                     f"{fmt(g('srv_mean'), 2)} | {fmt(g('sql_per_req'), 2)} | {fmt(g('toast_per_req'), 1)} | "
                     f"{hit_ratio(ms)} | {fmt(g('share_304'), 1, '%')} |")
             lines.append("")
@@ -681,22 +870,34 @@ def write_report(session: Path, metrics: list[dict]) -> Path:
                              f"{fmt(med('commits_per_req'), 2)} | {fmt(med('blocks_per_req'), 1)} |")
             lines.append("")
 
-            # p95 theo thao tác ở mức tải giữa
+            # p95 theo thao tác ở mức cao nhất mà mọi cấu hình còn phục vụ kịp và giữ SLO (trung vị qua các lần lặp).
+            # Ở mức quá tải, mọi thao tác chỉ còn thời gian xếp hàng như nhau (phiên b3, 700 req/s) nên không so được.
+            # Mô hình đóng (W1) không có SLO theo tốc độ đến: giữ mức giữa như trước.
             levels = sorted({m["level"] for m in fixed}, key=level_key)
-            ref_level = levels[len(levels) // 2]
+            if closed:
+                ref_level, ref_note = levels[len(levels) // 2], ""
+            else:
+                ref_level, ref_note = levels[0], "mức thấp nhất, không mức nào mọi cấu hình đều giữ SLO"
+                for level in reversed(levels):
+                    if all(level_passes(ms) for (c, lv), ms in groups.items() if lv == level):
+                        ref_level, ref_note = level, "mức cao nhất mà mọi cấu hình còn giữ SLO"
+                        break
             per_config = {}
             for cfg in configs:
                 ms = groups.get((cfg, ref_level), [])
                 ops = sorted({op for m in ms for op in m["ops"]})
                 per_config[cfg] = {op: (spread([m["ops"].get(op, {}).get("p95") for m in ms]) or (None,))[0]
                                    for op in ops}
+            # Chỉ các cấu hình có chạy kịch bản này ở mức đó (W7 chỉ chạy ở một cấu hình)
+            shown = [c for c in configs if per_config.get(c)]
             ops = sorted({op for d in per_config.values() for op in d},
-                         key=lambda op: -(per_config.get(configs[0], {}).get(op) or 0))
+                         key=lambda op: -(per_config.get(shown[0], {}).get(op) or 0))
             if ops:
-                lines += [f"p95 theo thao tác ở mức {ref_level} (ms, trung vị):", "",
-                          "| Thao tác | " + " | ".join(configs) + " |", "|---|" + "---|" * len(configs)]
+                note = "" if closed or len(levels) == 1 else f", {ref_note}"
+                lines += [f"p95 theo thao tác ở mức {ref_level} (ms, trung vị{note}):", "",
+                          "| Thao tác | " + " | ".join(shown) + " |", "|---|" + "---|" * len(shown)]
                 for op in ops:
-                    lines.append(f"| {op} | " + " | ".join(fmt(per_config[c].get(op)) for c in configs) + " |")
+                    lines.append(f"| {op} | " + " | ".join(fmt(per_config[c].get(op)) for c in shown) + " |")
                 lines.append("")
             if plt:
                 if not closed:
@@ -707,7 +908,8 @@ def write_report(session: Path, metrics: list[dict]) -> Path:
                 lines.append("")
 
             # Câu SQL tốn thời gian nhất của một lần chạy tiêu biểu
-            sample = next((m for m in sorted(groups.get((configs[0], ref_level), []), key=lambda m: m["rep"])), None)
+            sample_cfg = shown[0] if shown else configs[0]
+            sample = next((m for m in sorted(groups.get((sample_cfg, ref_level), []), key=lambda m: m["rep"])), None)
             if sample and sample["top_sql"] and sample["total_requests"]:
                 lines += [f"Câu SQL tốn thời gian nhất (`{sample['run']}`):", "",
                           "| Lần gọi/request | Trung bình (ms) | % thời gian CSDL | Câu lệnh |", "|---|---|---|---|"]
@@ -719,6 +921,10 @@ def write_report(session: Path, metrics: list[dict]) -> Path:
                     lines.append(f"| {num(s['calls']) / sample['total_requests']:.3f} | {num(s['mean_exec_ms']):.2f} | "
                                  f"{100 * num(s['total_exec_ms']) / total_ms:.0f}% | `{query}` |")
                 lines.append("")
+
+    incident_runs = [m for m in usable if m.get("incident")]
+    if incident_runs:
+        lines += incident_section(session, incident_runs, plt, charts_dir)
 
     profiled = [m for m in metrics if m["profiled"]]
     if profiled:
@@ -756,7 +962,8 @@ def explain_tables(session: Path) -> list[str]:
 def write_summary_csv(session: Path, metrics: list[dict]) -> Path:
     fields = ["run", "config", "git_sha", "workload", "mode", "level", "rep", "status", "profiled", "count", "rps",
               "capacity", "p50", "p95", "p99", "avg", "err", "r304", "share_304", "r409", "r4xx", "r5xx", "rnone", "conflicts",
-              "fallbacks", "dropped", "cpu_app", "cpu_db", "cpu_cache", "cpu_loadgen", "loadgen_max", "steal", "sut_busy",
+              "fallbacks", "dropped", "instances", "incident", "cpu_app", "cpu_db", "cpu_cache", "cpu_lb", "cpu_loadgen",
+              "loadgen_max", "steal", "sut_busy",
               "srv_mean", "srv_p95", "hikari_active", "hikari_pending_max", "tomcat_busy", "tomcat_busy_max",
               "gc_ms_per_s", "heap_max_mb", "hit_l1", "hit_l2", "hit_token", "sql_per_req", "commits_per_req", "blocks_per_req", "toast_per_req",
               "db_ms_per_req", "checkpoints", "cpu_app_drift", "l2_errors"]

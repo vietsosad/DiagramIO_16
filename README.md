@@ -9,7 +9,7 @@ DiagramIO là backend REST API (JSON) cho một web vẽ sơ đồ UML và ERD t
 
 | Thành viên | Mã sinh viên | Phụ trách |
 |---|---|---|
-| Lê Hoàng Việt | 23020169 | Toàn bộ pha 2: phép đo hiệu năng (M0), tối ưu truy cập dữ liệu (B1), cache hai tầng và HTTP conditional request (B2), cache xác thực link chia sẻ (B3), rà soát và gia cố, CI, đóng gói |
+| Lê Hoàng Việt | 23020169 | Toàn bộ pha 2: phép đo hiệu năng (M0), tối ưu truy cập dữ liệu (B1), cache hai tầng và HTTP conditional request (B2), cache xác thực link chia sẻ (B3), rà soát và gia cố, nhiều instance sau Nginx và tắt máy êm (B4), CI, đóng gói |
 
 Mã nguồn pha 1 (baseline) kế thừa từ repo gốc [Phamminh161005/DiagramIO](https://github.com/Phamminh161005/DiagramIO); repo này là bản fork, nơi thực hiện pha 2.
 
@@ -25,9 +25,9 @@ Bốn đối tượng chính là User (tài khoản), Diagram (tên, loại UML/
 Đã làm:
 
 - **Pha 1:** đăng ký, đăng nhập bằng JWT; quản lý sơ đồ; lịch sử phiên bản và khôi phục; chia sẻ công khai và qua link; chống ghi đè bằng optimistic locking; tài liệu OpenAPI; đóng gói Docker.
-- **Pha 2 (tới B3):** bộ đo hiệu năng tái lập được trên Kaggle; truy cập dữ liệu chỉ đọc và ghi đúng phần cần thiết; cache hai tầng (Caffeine, Redis) cho sơ đồ và phiên bản; ETag và 304; cache xác thực link chia sẻ với thu hồi có hiệu lực ngay; giới hạn kích thước request; CI.
+- **Pha 2 (tới B4):** bộ đo hiệu năng tái lập được trên Kaggle; truy cập dữ liệu chỉ đọc và ghi đúng phần cần thiết; cache hai tầng (Caffeine, Redis) cho sơ đồ và phiên bản; ETag và 304; cache xác thực link chia sẻ với thu hồi có hiệu lực ngay; giới hạn kích thước request; nhiều instance sau Nginx, probe liveness và readiness, tắt máy êm, khởi động lại cuốn chiếu không rơi request; CI.
 
-Chưa làm hoặc ngoài phạm vi: giao diện frontend và canvas; cộng tác thời gian thực (WebSocket, CRDT); đăng nhập qua bên thứ ba; khôi phục mật khẩu qua email; mẫu sơ đồ. Xuất PNG/SVG/PDF, chạy nhiều instance sau load balancer, rate limiting là các phần sau của pha 2 (B4–B6).
+Chưa làm hoặc ngoài phạm vi: giao diện frontend và canvas; cộng tác thời gian thực (WebSocket, CRDT); đăng nhập qua bên thứ ba; khôi phục mật khẩu qua email; mẫu sơ đồ. Rate limiting, xuất PNG/SVG/PDF là các phần sau của pha 2 (B5, B6).
 
 ## 2. Công nghệ
 
@@ -190,6 +190,21 @@ Số liệu cho việc đo hiệu năng (Spring Boot Actuator) nằm trên cổn
 | `REDIS_PORT` | Cổng mở ra máy cho Redis (chỉ dùng ở chế độ `redis`, `two-level`) |
 | `DIAGRAMIO_HTTP_MAX_REQUEST_SIZE` | Body request lớn nhất (mặc định `4MB`); lớn hơn thì 413, không đọc |
 | `JAVA_TOOL_OPTIONS` | Cờ JVM trong container; image đặt sẵn `-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError` |
+| `SHUTDOWN_TIMEOUT` | Thời gian tối đa để phục vụ nốt request đang chạy khi app nhận SIGTERM (mặc định `20s`) |
+| `APP_POOL_SIZE`, `APP_MEMORY` | Chỉ với `docker-compose.scale.yml`: số kết nối CSDL và RAM của mỗi instance (mặc định 4 và `1g`) |
+
+Chạy nhiều instance sau Nginx (B4, [ADR-0006](docs/adr/0006-mo-rong-ngang-san-sang.md)):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --build --scale app=3
+bash deploy/rolling-restart.sh   # khởi động lại lần lượt từng instance, không rơi request nào
+```
+
+- Nginx nhận ở `APP_PORT` và chia tải cho các instance (`least_conn`); instance không mở cổng nào ra máy. Nhiều instance thì cache chạy chế độ `two-level` (file override đặt sẵn). Tổng số kết nối CSDL không tăng theo số instance: đặt `APP_POOL_SIZE` bằng tổng chia số instance.
+- Mỗi instance có probe `liveness` và `readiness` (`/actuator/health/liveness`, `/actuator/health/readiness` trên cổng quản trị, chỉ trong container). Healthcheck của Docker dùng readiness, nên Nginx chỉ khởi động khi các instance đã sẵn sàng.
+- Nhận SIGTERM, instance báo không sẵn sàng, thôi nhận kết nối mới, phục vụ nốt request đang chạy (tối đa `SHUTDOWN_TIMEOUT`) rồi mới tắt.
+- `rolling-restart.sh`: với từng instance, Nginx thôi gửi tới nó, chờ request dở xong, Docker tắt êm rồi bật lại, chờ readiness, rồi Nginx gửi lại. Script chỉ khởi động lại container đang chạy; Docker Compose không có cập nhật cuốn chiếu sang image mới (ADR-0006).
+- Một instance chết đột ngột: Nginx chuyển GET, PUT, DELETE sang instance khác; POST, PATCH đã gửi tới instance đó thì client nhận 502, không gửi lại để tránh tạo trùng.
 
 Thử nhanh bằng `curl`:
 
@@ -202,7 +217,7 @@ curl -s -X POST localhost:8080/api/v1/diagrams -H "Authorization: Bearer $TOKEN"
 
 Kiểm thử:
 
-- **CI** (GitHub Actions, `.github/workflows/ci.yml`) chạy ở mỗi pull request và mỗi lần đẩy lên `main`: toàn bộ test, `shellcheck` và kiểm tra cú pháp các script bộ đo, kiểm tra `docker-compose.yml`, build image.
+- **CI** (GitHub Actions, `.github/workflows/ci.yml`) chạy ở mỗi pull request và mỗi lần đẩy lên `main`: toàn bộ test, `shellcheck` và kiểm tra cú pháp các script bộ đo và triển khai, kiểm tra `docker-compose.yml` và `docker-compose.scale.yml`, `nginx -t` cho cấu hình Nginx, build image.
 - **Chạy test ở máy:** `./mvnw test` (cần Docker đang chạy). Có ba nhóm:
   - Unit test và test controller (MockMvc): chạy được ở mọi máy.
   - Test CSDL và Redis trong `infrastructure` (Testcontainers): không có Docker thì tự bỏ qua. Gồm cả các tình huống tranh chấp (lần đọc chậm không được đè bản mới, token đã thu hồi không được sống lại trong cache) và Redis bị treo giữa chừng (`docker pause`).
@@ -212,6 +227,7 @@ Kiểm thử:
   - `CacheE2eTest`, `ShareTokenCacheE2eTest`: ETag, 304, cache sơ đồ và cache token (đọc qua link khi trúng cache không tốn câu SQL nào).
   - `TwoInstanceCacheE2eTest`: hai bản app thật dùng chung PostgreSQL và Redis; sửa, xóa, thu hồi link ở bản này thì bản kia thấy.
   - `RequestLimitsE2eTest`, `RedisDownAtStartupE2eTest`: giới hạn body (413) và app khởi động được khi Redis chưa lên.
+  - `GracefulShutdownE2eTest`, `NginxFailoverE2eTest`: tắt êm (request đang chạy vẫn xong, readiness báo từ chối trước khi cổng đóng) và Nginx thật trước hai instance thật (Nginx thôi gửi tới một instance rồi instance đó tắt giữa lúc có tải mà không request nào lỗi; hết instance thì Nginx trả 502 theo khung JSON của API).
 - Dùng JDK mới hơn 21 (ví dụ 25) thì thêm `-DargLine="-Dnet.bytebuddy.experimental=true"` để Mockito chạy được.
 
 Việc thường làm khác:
@@ -250,6 +266,7 @@ Các cấu hình so sánh (mỗi cấu hình là một tag, cấu hình bật/t�
 | C1 | `v2.1-b1` | C0 + B1 | `b12` |
 | C2, C3 | `v2.2-b2` | C1 + B2, cache `local` (C2) hoặc `two-level` (C3) | `b12` |
 | C2, C3 và C2b3, C3b3 | `v2.3.2` | Cùng một jar (B3, gia cố sau B3, bản sửa cache sau phiên `b12`), cache token tắt (C2, C3) hoặc bật (C2b3, C3b3) | `b3` |
+| C3, C4x1, C4x2, C4x3 | `v2.4-b4` | B4: một app (C3) so với 1, 2, 3 instance sau Nginx, cùng tổng heap và tổng số kết nối CSDL | `b4` |
 
 Kết quả B1, B2 (phiên `b12`, Kaggle Intel Xeon 2,20 GHz, khác máy của phiên M0 nên C0 cũng khác; chỉ so trong cùng phiên), chi tiết ở [docs/pha-2/ket-qua.md](docs/pha-2/ket-qua.md):
 
@@ -263,7 +280,13 @@ Kết quả B1, B2 (phiên `b12`, Kaggle Intel Xeon 2,20 GHz, khác máy của p
 | W1 | Throughput (50 VU) | 832 req/s | **1.191 req/s** | 1.156 req/s |
 | CSDL | SQL mỗi request (W2 / W3) | 2,15 / 2,19 | 1,49 / 1,52 | **0,87 / 0,91** |
 
-Phiên này cũng phát hiện hai lỗi của cache B2 khi Redis hết thời gian chờ: cache trả bản cũ, và PUT đúng version nhận 409. Cả hai đã sửa ([ADR-0003](docs/adr/0003-cache-hai-tang-etag.md) mục 8). C2, C3 cùng B3 được đo lại ở phiên `b3`.
+Phiên này cũng phát hiện hai lỗi của cache B2 khi Redis hết thời gian chờ: cache trả bản cũ, và PUT đúng version nhận 409. Cả hai đã sửa ([ADR-0003](docs/adr/0003-cache-hai-tang-etag.md) mục 8).
+
+Kết quả B3 và đo lại C2, C3 (phiên `b3`, [ket-qua.md](docs/pha-2/ket-qua.md) mục 7):
+
+- Bản sửa cache đứng vững: không có lần 409 nào trong 28 lần chạy, dù Redis vẫn hết thời gian chờ lúc warm-up. 304 tăng từ 0,3% lên 2,5-3,0% số request.
+- Cache token bớt 19-20% số câu SQL và 21-22% số transaction mỗi request của W2, trúng 80%. Ở một instance, p50 của request qua link giảm từ 2,0 xuống 1,1 ms. Sức chứa không đổi (700-750 req/s ở cả bốn cấu hình, sát giới hạn của k6). Chênh lệch CPU app không tách được khỏi nhiễu của máy ảo trong phiên này.
+- Mức 700 req/s cố định không đo được vì JVM nguội nhận ngay toàn bộ tải; bộ đo đã thêm warm-up tăng dần (`WARMUP_RAMP`).
 
 Số đo pha 1 (Locust trên Kaggle, commit `ca41f27`) được giữ trong [docs/pha-1/kiem-thu-tai-locust.md](docs/pha-1/kiem-thu-tai-locust.md) để tham khảo. Không so trực tiếp với pha 2: Locust, app và CSDL dùng chung CPU, kịch bản 100% ghi trên CSDL gần rỗng. Cùng chuỗi request ở 10 người dùng, Locust chỉ đẩy được 330 req/s còn k6 đẩy được 1.503 req/s, tức là số pha 1 chủ yếu đo giới hạn của công cụ tạo tải.
 
@@ -281,10 +304,10 @@ Kế hoạch chi tiết: [docs/ke-hoach-pha-2.md](docs/ke-hoach-pha-2.md).
 |---|---|---|---|
 | M0 | Dựng lại phép đo (phép đo pha 1 đo giới hạn của Locust) | Xong, đã đo C0 | [0001](docs/adr/0001-phuong-phap-do.md) |
 | B1 | Mỗi request chạy thừa SQL và chở `data` (tới 2 MB) không cần thiết | Xong, đã đo: sức chứa W2 gấp 4 | [0002](docs/adr/0002-toi-uu-truy-cap-du-lieu.md) |
-| B2 | Đường đọc sơ đồ luôn chạm CSDL; client mở lại vẫn nhận lại toàn bộ nội dung | Xong, đã đo; sửa 2 lỗi phiên đo phát hiện, đo lại ở `b3` | [0003](docs/adr/0003-cache-hai-tang-etag.md) |
-| B3 | Mọi request có `X-Share-Token` đều tra CSDL, trong khi thu hồi phải có hiệu lực ngay | Xong, chờ số đo Kaggle (`b3`) | [0004](docs/adr/0004-cache-token-chia-se.md) |
+| B2 | Đường đọc sơ đồ luôn chạm CSDL; client mở lại vẫn nhận lại toàn bộ nội dung | Xong, đã đo; sửa 2 lỗi phiên đo phát hiện, đo lại ở `b3`: không còn 409 sai | [0003](docs/adr/0003-cache-hai-tang-etag.md) |
+| B3 | Mọi request có `X-Share-Token` đều tra CSDL, trong khi thu hồi phải có hiệu lực ngay | Xong, đã đo: SQL mỗi request của W2 −20% | [0004](docs/adr/0004-cache-token-chia-se.md) |
 | Rà soát | Gia cố sau B3: giới hạn body, khởi động khi Redis chết, bộ nhớ cache, CI, image | Xong | [0005](docs/adr/0005-ra-soat-gia-co-sau-b3.md) |
-| B4 | Chạy nhiều instance sau Nginx, tắt máy êm, sẵn sàng khi một instance chết | Chưa làm | |
+| B4 | Chạy nhiều instance sau Nginx, tắt máy êm, sẵn sàng khi một instance chết | Xong, chờ số đo Kaggle (`b4`) | [0006](docs/adr/0006-mo-rong-ngang-san-sang.md) |
 | B5 | Rate limiting, bulkhead cho đăng nhập, phát hiện refresh token bị dùng lại | Chưa làm | |
 | B6 | Xuất PNG/SVG/PDF qua hàng đợi và worker riêng | Chưa làm | |
 | B7 | Lưu phiên bản hiệu quả (khử trùng lặp, nén) | Chưa làm | |
